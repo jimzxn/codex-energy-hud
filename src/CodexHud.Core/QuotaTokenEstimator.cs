@@ -8,7 +8,13 @@ public enum EstimateState { Calibrating, Estimated, Variable, Incomplete, Stale,
 
 public sealed record QuotaTokenEstimate(string QuotaKey, EstimateState State, double? RemainingTokens,
     double? LowerTokens, double? UpperTokens, int Segments, double ObservedDrop,
-    DateTimeOffset? From, DateTimeOffset? Through, string Detail);
+    DateTimeOffset? From, DateTimeOffset? Through, string Detail)
+{
+    public double PendingDrop { get; init; }
+    public string? ProgressReason { get; init; }
+    public string? LastResetReason { get; init; }
+    public DateTimeOffset? LastResetAt { get; init; }
+}
 
 /// <summary>
 /// An empirical conversion from synchronized local token increments to quota percentage points.
@@ -45,12 +51,12 @@ public sealed class QuotaTokenEstimator
         {
             if (quota.Health is SampleHealth.Stale or SampleHealth.Unavailable or SampleHealth.Loading)
             {
-                BreakAll(EstimateState.Stale, "额度读数未更新，等待重新校准。", _windows.Count == 0);
+                PauseAll(EstimateState.Stale, "额度读数未更新，等待重新校准。");
                 return;
             }
             if (string.IsNullOrWhiteSpace(quota.AccountKey))
             {
-                BreakAll(EstimateState.Incomplete, "账户身份未确认，暂停配对。", _windows.Count == 0);
+                PauseAll(EstimateState.Incomplete, "账户身份未确认，暂停配对。");
                 return;
             }
             var account = Hash(quota.AccountKey);
@@ -61,25 +67,55 @@ public sealed class QuotaTokenEstimator
                 _globalReason = "账户已变化，重新校准。";
             }
             _accountHash = account;
+            var currentKeys = quota.Windows.Select(window => window.Key).ToHashSet(StringComparer.Ordinal);
+            foreach (var pair in _windows.Where(pair => !currentKeys.Contains(pair.Key)))
+                Pause(pair.Value, EstimateState.Unavailable, "额度周期已消失，请重新选择。", quota.ObservedAt);
+            foreach (var window in quota.Windows.Where(Supported))
+            {
+                bool identityComplete = window.WindowMinutes is > 0 && window.ResetsAt.HasValue;
+                var identity = WindowHash(window);
+                if (_windows.TryGetValue(window.Key, out var known) && (known.ObservedAt is null || quota.ObservedAt > known.ObservedAt))
+                {
+                    bool changed = identityComplete && (known.WindowHash != identity || window.ResetsAt <= quota.ObservedAt);
+                    bool rebound = Percent(window.RemainingPercent) && window.RemainingPercent > known.Remaining;
+                    if (changed || rebound)
+                    {
+                        Reset(known, EstimateState.Calibrating, changed
+                            ? "额度周期已变化，开始校准。" : "额度回升，开始重新校准。", quota.ObservedAt);
+                        if (identityComplete) known.WindowHash = identity;
+                    }
+                }
+                var key = Hash(window.Key);
+                if (_restored.TryGetValue(key, out var pending) && (pending.ObservedAt is null || quota.ObservedAt > pending.ObservedAt)
+                    && (identityComplete && (pending.WindowHash != identity || window.ResetsAt <= quota.ObservedAt)
+                        || Percent(window.RemainingPercent) && window.RemainingPercent > pending.Remaining))
+                    _restored.Remove(key);
+            }
             if (usage.Health != SampleHealth.Fresh || !Valid(usage.Counts)
                 || string.IsNullOrWhiteSpace(usage.Epoch))
             {
-                BreakAll(EstimateState.Incomplete, "本机 Token 采样不完整，等待连续记录后重新校准。", _windows.Count == 0);
+                PauseAll(EstimateState.Incomplete, "本机 Token 采样不完整，等待连续记录后重新校准。");
                 return;
             }
             if (AbsSeconds(quota.ObservedAt, usage.ObservedAt) > MaximumAlignment.TotalSeconds)
             {
-                BreakAll(EstimateState.Incomplete, "额度与 Token 时间未对齐，重新校准。", _windows.Count == 0);
+                PauseAll(EstimateState.Incomplete, "额度与 Token 时间未对齐，重新校准。");
                 return;
             }
             _globalStatus = EstimateState.Calibrating;
-
-            var currentKeys = quota.Windows.Select(window => window.Key).ToHashSet(StringComparer.Ordinal);
-            foreach (var pair in _windows.Where(pair => !currentKeys.Contains(pair.Key)))
-                Reset(pair.Value, EstimateState.Unavailable, "额度周期已消失，请重新选择。");
+            _globalReason = null;
 
             foreach (var window in quota.Windows.Where(Supported).Take(MaximumWindows))
             {
+                // Apply the saved watermark before creating an empty live state that could
+                // overwrite a newer candidate history from another period on the next Save.
+                if (_restored.TryGetValue(Hash(window.Key), out var candidate) && candidate.AccountHash == account
+                    && candidate.ObservedAt is { } savedAt && quota.ObservedAt <= savedAt)
+                {
+                    _globalStatus = EstimateState.Stale;
+                    _globalReason = "额度记录尚未超过已保存的采样时间，等待新读数。";
+                    continue;
+                }
                 if (!_windows.TryGetValue(window.Key, out var state))
                 {
                     if (_windows.Count >= MaximumWindows)
@@ -105,9 +141,11 @@ public sealed class QuotaTokenEstimator
             if (state.ObservedAt is null || state.Status is EstimateState.Stale or EstimateState.Incomplete or EstimateState.Unavailable)
                 return Result(window.Key, state, state.Status, state.Reason);
             if (now - state.ObservedAt.Value > FreshAge || state.ObservedAt.Value - now > MaximumAlignment)
-                return Result(window.Key, state, EstimateState.Stale, "采样已过期，等待新的同步读数。");
+                return Result(window.Key, state, EstimateState.Stale, "采样已过期，等待新的同步读数。")
+                    with { PendingDrop = 0, ProgressReason = "采样已过期，等待新的同步读数。" };
             if (state.WindowHash != WindowHash(window) || window.ResetsAt <= now)
-                return Result(window.Key, state, EstimateState.Calibrating, "额度已重置，等待重新校准。");
+                return Result(window.Key, state, EstimateState.Calibrating, "额度已重置，等待重新校准。")
+                    with { PendingDrop = 0, ProgressReason = "额度已重置，等待重新校准。" };
             if (!Percent(window.RemainingPercent) || window.RemainingPercent != state.Remaining)
                 return Result(window.Key, state, EstimateState.Incomplete, "等待当前额度与 Token 配对。");
             if (state.NeedsConfirmation || state.Segments.Count < 3 || TotalDrop(state.Segments) < 6)
@@ -119,14 +157,16 @@ public sealed class QuotaTokenEstimator
             var lowRate = rates.Min();
             var highRate = rates.Max();
             var variance = state.Segments.Sum(segment => segment.Drop * Math.Pow(segment.Tokens / segment.Drop - rate, 2)) / drop;
-            var variable = highRate / lowRate > 2 || Math.Sqrt(variance) / rate > .35;
+            var variable = state.UsageVaried || highRate / lowRate > 2 || Math.Sqrt(variance) / rate > .35;
             var remaining = state.Remaining!.Value;
             var detail = Scope + (variable ? "分段比例波动较大。" : "")
                 + "范围取近期有效分段的最小值与最大值，并非置信区间。"
                 + (state.ModelHash is null ? "模型/速度信息未齐全。" : "");
             return new(window.Key, variable ? EstimateState.Variable : EstimateState.Estimated,
                 rate * remaining, lowRate * remaining, highRate * remaining,
-                state.Segments.Count, drop, state.Segments[0].From, state.ObservedAt, detail);
+                state.Segments.Count, drop, state.Segments[0].From, state.ObservedAt, detail)
+            { PendingDrop = state.PendingDrop, ProgressReason = state.Reason,
+                LastResetReason = state.LastResetReason, LastResetAt = state.LastResetAt };
         }
     }
 
@@ -134,60 +174,59 @@ public sealed class QuotaTokenEstimator
     {
         lock (_gate)
         {
-            BreakAll(EstimateState.Incomplete, string.IsNullOrWhiteSpace(reason) ? "采样中断，重新校准。" : reason);
+            PauseAll(EstimateState.Incomplete, string.IsNullOrWhiteSpace(reason) ? "采样中断，重新校准。" : reason);
         }
     }
 
     private void ObserveWindow(WindowState state, QuotaWindow window, DateTimeOffset time,
         UsageLedgerSnapshot usage, string account)
     {
-        if (!Percent(window.RemainingPercent) || window.WindowMinutes is null or <= 0)
+        // Check before identity handling: an old snapshot from a different period is still old.
+        if (state.ObservedAt is { } previous && time <= previous)
         {
-            Reset(state, EstimateState.Incomplete, "额度周期或百分比缺失，等待完整读数。");
+            if (time < previous) Pause(state, EstimateState.Stale, "额度记录时间回退，等待新的采样。", time);
+            return;
+        }
+        if (!Percent(window.RemainingPercent) || window.WindowMinutes is null or <= 0 || window.ResetsAt is null)
+        {
+            Pause(state, EstimateState.Incomplete, "额度周期、重置时间或百分比缺失，等待完整读数。", time);
             return;
         }
         if (window.ResetsAt <= time)
         {
-            Reset(state, EstimateState.Calibrating, "等待重置后的额度读数。");
+            Reset(state, EstimateState.Calibrating, "等待重置后的额度读数。", time);
             return;
         }
         var identity = WindowHash(window);
         var model = string.IsNullOrWhiteSpace(usage.ModelMix) ? null : Hash(usage.ModelMix);
         if (state.WindowHash != identity || state.AccountHash != account)
         {
-            Reset(state, EstimateState.Calibrating, "新的额度周期，开始校准。");
+            Reset(state, EstimateState.Calibrating, "新的额度周期，开始校准。", time);
             state.WindowHash = identity;
             state.AccountHash = account;
-            TryRestore(state, window.Key, account, identity, model);
-            state.ModelHash = model;
+            TryRestore(state, window.Key, account, identity, model, time);
         }
-        Prune(state, time);
-        if (state.Anchor is null)
-        {
-            TryRestore(state, window.Key, account, identity, model);
-            Baseline(state, window, time, usage, model);
-            return;
-        }
-        if (time == state.ObservedAt) return; // Replaying a quota reading cannot make it fresh.
+        TryRestore(state, window.Key, account, identity, model, time);
+        // Keep the watermark through a pause: a replay cannot establish a new baseline.
+        if (time == state.ObservedAt) return;
         if (time < state.ObservedAt)
         {
-            Reset(state, EstimateState.Stale, "额度记录时间回退，等待新的采样。");
+            Pause(state, EstimateState.Stale, "额度记录时间回退，等待新的采样。", time);
+            return;
+        }
+        Prune(state, time);
+        if (window.RemainingPercent > state.Remaining)
+            Reset(state, EstimateState.Calibrating, "额度回升或重置，重新校准。", time);
+        TrackModel(state, model);
+        if (state.Anchor is null)
+        {
+            Baseline(state, window, time, usage, model);
             return;
         }
         var interruption = time - state.ObservedAt > MaximumGap || state.Epoch != usage.Epoch;
-        var changed = state.ModelHash != model;
-        if (interruption || changed || Regressed(state.LastCounts!, usage.Counts))
+        if (interruption || Regressed(state.LastCounts!, usage.Counts))
         {
-            Reset(state, EstimateState.Calibrating, changed ? "模型或速度模式改变，重新校准。"
-                : "采样中断或累计记录重建，重新校准。");
-            TryRestore(state, window.Key, account, identity, model);
-            Prune(state, time);
-            Baseline(state, window, time, usage, model);
-            return;
-        }
-        if (window.RemainingPercent > state.Remaining)
-        {
-            Reset(state, EstimateState.Calibrating, "额度回升或重置，重新校准。");
+            Pause(state, EstimateState.Calibrating, "采样中断，已保留有效分段。", time);
             Baseline(state, window, time, usage, model);
             return;
         }
@@ -197,9 +236,10 @@ public sealed class QuotaTokenEstimator
         var anchor = state.Anchor;
         var drop = anchor.Remaining - window.RemainingPercent!.Value;
         var delta = Difference(anchor.Counts, usage.Counts);
+        state.PendingDrop = Math.Clamp(drop, 0, 100);
         if (delta.Cached > delta.Input || delta.Output > delta.Tokens || delta.Input > delta.Tokens)
         {
-            Reset(state, EstimateState.Incomplete, "Token 明细增量不一致，重新校准。");
+            Pause(state, EstimateState.Incomplete, "Token 明细增量不一致，等待重新对齐。", time);
             return;
         }
         if (drop > 0 && delta.Tokens == 0)
@@ -209,29 +249,28 @@ public sealed class QuotaTokenEstimator
             state.Reason = "额度变化尚未匹配到本机 Token，等待记录更新。";
             if (time - state.UnmatchedAt > TokenLagGrace)
             {
-                Reset(state, EstimateState.Calibrating, "额度与本机 Token 未匹配，重新校准。");
+                Pause(state, EstimateState.Calibrating, "额度与本机 Token 未匹配，已保留有效分段。", time);
                 Baseline(state, window, time, usage, model);
             }
             return;
         }
         state.UnmatchedAt = null;
         state.Status = EstimateState.Calibrating;
+        state.Reason = state.NeedsConfirmation ? "等待一段新的有效变化，确认保留样本。" : "正在累计有效变化。";
         if (time - anchor.Time > TimeSpan.FromHours(2))
         {
-            Reset(state, EstimateState.Calibrating, "本段变化跨度过长，重新校准。");
+            Pause(state, EstimateState.Calibrating, "本段跨度超过两小时，已保留有效分段。", time);
             Baseline(state, window, time, usage, model);
             return;
         }
         if (drop < MinimumDrop || delta.Tokens <= 0) return;
         var segment = new Segment(anchor.Time, time, drop, delta.Tokens, delta.Input, delta.Cached, delta.Output);
         if (state.Segments.Count > 0 && StructureChanged(state.Segments, segment))
-        {
-            Reset(state, EstimateState.Calibrating, "输入、缓存或输出结构改变，重新校准。");
-            Baseline(state, window, time, usage, model);
-            return;
-        }
+            state.UsageVaried = true;
         state.Segments.Add(segment);
         state.NeedsConfirmation = false;
+        state.PendingDrop = 0;
+        state.Reason = "有效分段已保存，继续采样。";
         Prune(state, time);
         state.Anchor = new(time, window.RemainingPercent.Value, usage.Counts);
     }
@@ -244,47 +283,70 @@ public sealed class QuotaTokenEstimator
         state.ObservedAt = time;
         state.Remaining = window.RemainingPercent;
         state.Epoch = usage.Epoch;
-        state.ModelHash = model;
+        TrackModel(state, model);
+        state.PendingDrop = 0;
+        state.Reason = state.NeedsConfirmation ? "采样已重新对齐，等待一段新的有效变化。" : "正在累计有效变化。";
         state.Status = EstimateState.Calibrating;
         state.UnmatchedAt = null;
     }
 
-    private void TryRestore(WindowState state, string key, string account, string identity, string? model)
+    private static void TrackModel(WindowState state, string? model)
     {
-        var keyHash = Hash(key);
-        if (!_restored.TryGetValue(keyHash, out var stored)) return;
-        if (stored.AccountHash != account || stored.WindowHash != identity)
-        {
-            _restored.Remove(keyHash);
-            return;
-        }
-        // On startup a fresh ledger can precede its first model-bearing token record.
-        // Keep the candidate history until the model is known, without using its estimate.
-        if (model is null && stored.ModelHash is not null) return;
-        _restored.Remove(keyHash);
-        if (stored.ModelHash != model) return;
-        state.Segments.AddRange(stored.Segments);
-        state.NeedsConfirmation = state.Segments.Count > 0;
+        // A ten-minute idle profile expiring to null is not a change in token accounting.
+        if (model is null) return;
+        if (state.ModelHash is not null && state.ModelHash != model) state.UsageVaried = true;
+        state.ModelHash = model;
     }
 
-    private void BreakAll(EstimateState status, string reason, bool preservePending = false)
+    private void TryRestore(WindowState state, string key, string account, string identity, string? model, DateTimeOffset time)
+    {
+        if (!_restored.Remove(Hash(key), out var stored)) return;
+        if (stored.AccountHash != account || stored.WindowHash != identity) return;
+        state.Segments.AddRange(stored.Segments);
+        state.ObservedAt = stored.ObservedAt;
+        state.Remaining = stored.Remaining;
+        state.ModelHash = stored.ModelHash;
+        state.UsageVaried = stored.UsageVaried;
+        state.LastResetAt = stored.LastResetAt;
+        state.LastResetReason = stored.LastResetReason;
+        state.NeedsConfirmation = state.Segments.Count > 0;
+        TrackModel(state, model);
+        Prune(state, time);
+    }
+
+    private void PauseAll(EstimateState status, string reason)
     {
         _globalReason = reason;
         _globalStatus = status;
-        if (!preservePending) _restored.Clear();
-        foreach (var state in _windows.Values) Reset(state, status, reason);
+        foreach (var state in _windows.Values) Pause(state, status, reason);
+        // Closed history stays on disk even while its live account/ledger is unavailable.
         Save();
     }
 
-    private static void Reset(WindowState state, EstimateState status, string reason)
+    private static void Pause(WindowState state, EstimateState status, string reason, DateTimeOffset? time = null)
     {
-        state.Segments.Clear();
+        if (state.Anchor is not null || state.LastResetReason != reason)
+        {
+            state.LastResetAt = time ?? DateTimeOffset.UtcNow;
+            state.LastResetReason = reason;
+        }
         state.Anchor = null;
         state.LastCounts = null;
         state.UnmatchedAt = null;
-        state.NeedsConfirmation = false;
+        state.PendingDrop = 0;
+        state.NeedsConfirmation = state.Segments.Count > 0;
         state.Status = status;
         state.Reason = reason;
+    }
+
+    private static void Reset(WindowState state, EstimateState status, string reason, DateTimeOffset? time = null)
+    {
+        state.Segments.Clear();
+        state.UsageVaried = false;
+        state.ModelHash = null;
+        state.Remaining = null;
+        state.ObservedAt = null;
+        Pause(state, status, reason, time);
     }
 
     private static bool Supported(QuotaWindow window) => string.Equals(window.LimitId, "codex", StringComparison.OrdinalIgnoreCase);
@@ -322,10 +384,12 @@ public sealed class QuotaTokenEstimator
         if (state.Segments.Count > MaximumSegments) state.Segments.RemoveRange(0, state.Segments.Count - MaximumSegments);
     }
     private static QuotaTokenEstimate Empty(string key, EstimateState status, string detail) =>
-        new(key, status, null, null, null, 0, 0, null, null, detail + " " + Scope);
+        new(key, status, null, null, null, 0, 0, null, null, detail + " " + Scope) { ProgressReason = detail };
     private static QuotaTokenEstimate Result(string key, WindowState state, EstimateState status, string detail) =>
         new(key, status, null, null, null, state.Segments.Count, TotalDrop(state.Segments),
-            state.Segments.Count > 0 ? state.Segments[0].From : state.Anchor?.Time, state.ObservedAt, detail + " " + Scope);
+            state.Segments.Count > 0 ? state.Segments[0].From : state.Anchor?.Time, state.ObservedAt, detail + " " + Scope)
+        { PendingDrop = state.PendingDrop, ProgressReason = status == state.Status ? state.Reason : detail,
+            LastResetReason = state.LastResetReason, LastResetAt = state.LastResetAt };
 
     // Each segment is a disjoint decline in one monotone 0..100 quota period. Floating-point
     // summation can yield 100.00000000000001 at its zero endpoint; preserve the known domain.
@@ -339,14 +403,19 @@ public sealed class QuotaTokenEstimator
             var info = new FileInfo(_storagePath);
             if (!info.Exists || info.Length > 512 * 1024) return;
             var data = JsonSerializer.Deserialize<StoredHistory>(File.ReadAllText(_storagePath));
-            if (data is not { Version: 1 } || data.Windows is null) return;
+            // Version 1 used a different collection scope and must not seed the corrected ratio.
+            if (data is not { Version: 2 } || data.Windows is null) return;
             foreach (var window in data.Windows.Take(MaximumWindows))
             {
                 if (window is null || !HashValue(window.KeyHash) || !HashValue(window.AccountHash) || !HashValue(window.WindowHash)
-                    || window.ModelHash is not null && !HashValue(window.ModelHash) || window.Segments is null) continue;
+                    || window.ModelHash is not null && !HashValue(window.ModelHash) || window.Segments is null
+                    || window.Remaining is not null && !Percent(window.Remaining)
+                    || window.LastResetReason is { Length: > 256 } || window.Reason is { Length: > 256 }) continue;
                 var valid = window.Segments.TakeLast(MaximumSegments).Where(ValidSegment).OrderBy(segment => segment.From).ToArray();
                 if (valid.Length != window.Segments.Count || valid.Sum(segment => segment.Drop) > 100 + 1e-9
-                    || valid.Zip(valid.Skip(1), (a, b) => a.Through <= b.From).Any(ok => !ok)) continue;
+                    || valid.Zip(valid.Skip(1), (a, b) => a.Through <= b.From).Any(ok => !ok)
+                    || valid.Length > 0 && (window.Remaining is null || window.ObservedAt is null
+                        || valid.Any(segment => segment.Through > window.ObservedAt))) continue;
                 _restored[window.KeyHash] = window with { Segments = valid.ToList() };
             }
         }
@@ -365,16 +434,20 @@ public sealed class QuotaTokenEstimator
             var path = Path.GetFullPath(_storagePath);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            var windows = _windows.Where(pair => pair.Value.Segments.Count > 0).Take(MaximumWindows)
+            var windows = _windows.Where(pair => pair.Value.AccountHash is not null && pair.Value.WindowHash is not null).Take(MaximumWindows)
                 .Select(pair => new StoredWindow(Hash(pair.Key), pair.Value.AccountHash!, pair.Value.WindowHash!,
-                    pair.Value.ModelHash, pair.Value.Segments.ToList())).ToList();
+                    pair.Value.ModelHash, pair.Value.Segments.ToList())
+                { Remaining = pair.Value.Remaining, ObservedAt = pair.Value.ObservedAt,
+                    UsageVaried = pair.Value.UsageVaried, LastResetAt = pair.Value.LastResetAt,
+                    LastResetReason = pair.Value.LastResetReason, Reason = pair.Value.Reason,
+                    Status = pair.Value.Status.ToString(), PendingDrop = pair.Value.PendingDrop }).ToList();
             foreach (var pending in _restored.Values)
             {
                 if (windows.Count >= MaximumWindows) break;
                 if ((_accountHash is null || pending.AccountHash == _accountHash)
                     && windows.All(existing => existing.KeyHash != pending.KeyHash)) windows.Add(pending);
             }
-            File.WriteAllText(temporary, JsonSerializer.Serialize(new StoredHistory(1, windows)));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new StoredHistory(2, windows) { SavedAt = DateTimeOffset.UtcNow, GlobalReason = _globalReason }));
             File.Move(temporary, path, true);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
@@ -407,10 +480,27 @@ public sealed class QuotaTokenEstimator
         public List<Segment> Segments { get; } = new();
         public EstimateState Status = EstimateState.Calibrating;
         public string Reason = "等待同步采样。";
-        public bool NeedsConfirmation;
+        public bool NeedsConfirmation, UsageVaried;
+        public double PendingDrop;
+        public DateTimeOffset? LastResetAt;
+        public string? LastResetReason;
     }
     private sealed record Anchor(DateTimeOffset Time, double Remaining, TokenCounts Counts);
     private sealed record Segment(DateTimeOffset From, DateTimeOffset Through, double Drop, double Tokens, double Input, double Cached, double Output);
-    private sealed record StoredWindow(string KeyHash, string AccountHash, string WindowHash, string? ModelHash, List<Segment> Segments);
-    private sealed record StoredHistory(int Version, List<StoredWindow> Windows);
+    private sealed record StoredWindow(string KeyHash, string AccountHash, string WindowHash, string? ModelHash, List<Segment> Segments)
+    {
+        public double? Remaining { get; init; }
+        public DateTimeOffset? ObservedAt { get; init; }
+        public bool UsageVaried { get; init; }
+        public string? Reason { get; init; }
+        public string? Status { get; init; }
+        public double PendingDrop { get; init; }
+        public DateTimeOffset? LastResetAt { get; init; }
+        public string? LastResetReason { get; init; }
+    }
+    private sealed record StoredHistory(int Version, List<StoredWindow> Windows)
+    {
+        public DateTimeOffset SavedAt { get; init; }
+        public string? GlobalReason { get; init; }
+    }
 }

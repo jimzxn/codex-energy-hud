@@ -86,12 +86,12 @@ public static class QuotaEstimateTests
             Observe(estimator, 5, 92, 4000);
             Near(estimator.Get(Window(92), Start.AddMinutes(5)).RemainingTokens, 46000);
         });
-        Check("unmatched account decline eventually recalibrates", () =>
+        Check("unmatched account decline pauses without losing closed samples", () =>
         {
             var estimator = Trained();
             for (var minute = 4; minute <= 7; minute++) Observe(estimator, minute, 92, 3000);
             var estimate = estimator.Get(Window(92), Start.AddMinutes(7));
-            Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 0 && estimate.RemainingTokens is null);
+            Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 3 && estimate.RemainingTokens is null);
         });
         Check("stale quota, incomplete ledger, and alignment gaps do not retain a balance", () =>
         {
@@ -109,7 +109,7 @@ public static class QuotaEstimateTests
                 estimator.Observe(quota, usage);
                 var estimate = estimator.Get(Window(92), Start.AddMinutes(4));
                 Require(estimate.State == (mode == "quota" ? EstimateState.Stale : EstimateState.Incomplete));
-                Require(estimate.Segments == 0 && estimate.RemainingTokens is null);
+                Require(estimate.Segments == 3 && estimate.RemainingTokens is null);
             }
         });
         Check("partial independent quota fields do not block a complete selected period", () =>
@@ -132,7 +132,7 @@ public static class QuotaEstimateTests
             Require(estimate.State == EstimateState.Unavailable && estimate.RemainingTokens is null);
             Require(estimator.Get(null, Start).State == EstimateState.Unavailable);
         });
-        Check("account, epoch, model, and speed changes each recalibrate", () =>
+        Check("accounts reset, epochs pause, and same-pool model or speed changes keep valid segments", () =>
         {
             foreach (var mode in new[] { "account", "epoch", "model", "speed" })
             {
@@ -141,10 +141,12 @@ public static class QuotaEstimateTests
                     Usage(4, 4000) with { Epoch = mode == "epoch" ? "rebuilt" : "epoch-A",
                         ModelMix = mode is "model" or "speed" ? mode + "-changed" : "model-A/default" });
                 var estimate = estimator.Get(Window(92), Start.AddMinutes(4));
-                Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 0 && estimate.RemainingTokens is null);
+                if (mode == "account") Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 0 && estimate.RemainingTokens is null);
+                else if (mode == "epoch") Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 3 && estimate.RemainingTokens is null);
+                else Require(estimate.State == EstimateState.Variable && estimate.Segments == 4 && estimate.RemainingTokens > 0);
             }
         });
-        Check("input-output and cache structure shifts stop using the old ratio", () =>
+        Check("input-output and cache structure shifts preserve samples and flag variation", () =>
         {
             foreach (var mode in new[] { "output", "cache" })
             {
@@ -153,7 +155,7 @@ public static class QuotaEstimateTests
                     : new TokenCounts(3200, 1200, 0, 800, 0, 4000);
                 estimator.Observe(Snapshot(4, 92), Usage(4, 4000) with { Counts = counts });
                 var estimate = estimator.Get(Window(92), Start.AddMinutes(4));
-                Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 0);
+                Require(estimate.State == EstimateState.Variable && estimate.Segments == 4);
             }
         });
         Check("resets, balance increases, and duration changes are isolated", () =>
@@ -203,7 +205,7 @@ public static class QuotaEstimateTests
                 var minute = mode == "gap" ? 7 : mode == "time" ? 2 : 4;
                 Observe(estimator, minute, 92, mode == "counts" ? 2000 : 4000);
                 var estimate = estimator.Get(Window(92), Start.AddMinutes(minute));
-                Require(estimate.RemainingTokens is null && estimate.Segments == 0);
+                Require(estimate.RemainingTokens is null && estimate.Segments == (mode == "time" ? 2 : 3));
                 Require(estimate.State == (mode == "time" ? EstimateState.Stale : EstimateState.Calibrating));
             }
         });
@@ -244,7 +246,7 @@ public static class QuotaEstimateTests
             Near(estimate.RemainingTokens, 46000);
             Require(!Directory.EnumerateFiles(Path.GetDirectoryName(path)!, "*.tmp").Any());
         }));
-        Check("restored history is not reused for another account or model", () => WithStorage(path =>
+        Check("restored history rejects another account and retains changed-model samples pending confirmation", () => WithStorage(path =>
         {
             Trained(path);
             var account = new QuotaTokenEstimator(path);
@@ -253,7 +255,10 @@ public static class QuotaEstimateTests
             Trained(path);
             var model = new QuotaTokenEstimator(path);
             model.Observe(Snapshot(4, 94), Usage(4, 0) with { ModelMix = "other" });
-            Require(model.Get(Window(94), Start.AddMinutes(4)).Segments == 0);
+            Require(model.Get(Window(94), Start.AddMinutes(4)).Segments == 3);
+            Require(model.Get(Window(94), Start.AddMinutes(4)).RemainingTokens is null);
+            model.Observe(Snapshot(5, 92), Usage(5, 1000) with { ModelMix = "other" });
+            Require(model.Get(Window(92), Start.AddMinutes(5)).State == EstimateState.Variable);
         }));
         Check("restart waits through missing ledger and model before confirming saved history", () => WithStorage(path =>
         {
@@ -321,6 +326,160 @@ public static class QuotaEstimateTests
             estimator.Get(Window(100), DateTimeOffset.MinValue);
             estimator.Get(Window(100), DateTimeOffset.MaxValue);
         });
+        Check("pending decline is visible without pretending it is a completed segment", () =>
+        {
+            var estimator = new QuotaTokenEstimator();
+            Observe(estimator, 0, 100, 0);
+            Observe(estimator, 1, 99, 500);
+            var pending = estimator.Get(Window(99), Start.AddMinutes(1));
+            Require(pending.Segments == 0 && pending.ObservedDrop == 0 && pending.PendingDrop == 1);
+            Observe(estimator, 2, 98, 1000);
+            var closed = estimator.Get(Window(98), Start.AddMinutes(2));
+            Require(closed.Segments == 1 && closed.ObservedDrop == 2 && closed.PendingDrop == 0);
+        });
+        Check("pause ignores replays and confirms only a new complete segment", () =>
+        {
+            var estimator = Trained();
+            estimator.Observe(Snapshot(4, 92), Usage(4, 4000) with { Health = SampleHealth.Partial });
+            estimator.Observe(Snapshot(3, 94), Usage(3, 3000));
+            var replay = estimator.Get(Window(94), Start.AddMinutes(3));
+            Require(replay.State == EstimateState.Incomplete && replay.Segments == 3 && replay.RemainingTokens is null);
+            Observe(estimator, 5, 90, 5000);
+            Require(estimator.Get(Window(90), Start.AddMinutes(5)).RemainingTokens is null);
+            Observe(estimator, 6, 89, 5500);
+            Require(estimator.Get(Window(89), Start.AddMinutes(6)).PendingDrop == 1);
+            Require(estimator.Get(Window(89), Start.AddMinutes(6)).RemainingTokens is null);
+            Observe(estimator, 7, 88, 6000);
+            var confirmed = estimator.Get(Window(88), Start.AddMinutes(7));
+            Require(confirmed.State == EstimateState.Estimated && confirmed.Segments == 4 && confirmed.ObservedDrop == 8);
+            Near(confirmed.RemainingTokens, 44000);
+        });
+        Check("an older higher balance cannot erase closed history during a pause", () =>
+        {
+            var estimator = Trained();
+            estimator.Invalidate("暂停");
+            Observe(estimator, 2, 96, 2000);
+            var held = estimator.Get(Window(94), Start.AddMinutes(3));
+            Require(held.State == EstimateState.Stale && held.Segments == 3 && held.RemainingTokens is null);
+        });
+        Check("idle profile expiry and mixed workloads do not erase progress", () =>
+        {
+            var estimator = new QuotaTokenEstimator();
+            Observe(estimator, 0, 100, 0);
+            Observe(estimator, 1, 98, 1000);
+            estimator.Observe(Snapshot(2, 97), Usage(2, 1500) with { ModelMix = null });
+            estimator.Observe(Snapshot(3, 96), Usage(3, 2000) with { ModelMix = "model-A/default | model-B/high" });
+            estimator.Observe(Snapshot(4, 94), Usage(4, 3000) with { ModelMix = "model-A/default" });
+            var estimate = estimator.Get(Window(94), Start.AddMinutes(4));
+            Require(estimate.State == EstimateState.Variable && estimate.Segments == 3 && estimate.ObservedDrop == 6);
+            Near(estimate.RemainingTokens, 47000);
+        });
+        Check("cache shifts during initial calibration still produce an honest variable estimate", () =>
+        {
+            var estimator = new QuotaTokenEstimator();
+            var totals = new[] { new TokenCounts(0,0,0,0,0,0), new TokenCounts(800,400,0,200,0,1000),
+                new TokenCounts(1600,400,0,400,0,2000), new TokenCounts(2400,1200,0,600,0,3000) };
+            for (int i = 0; i < totals.Length; i++)
+                estimator.Observe(Snapshot(i,100-i*2), Usage(i,i*1000) with { Counts = totals[i] });
+            var result = estimator.Get(Window(94), Start.AddMinutes(3));
+            Require(result.State == EstimateState.Variable && result.Segments == 3);
+        });
+        Check("paused history and reason survive repeated restarts without duplicating segments", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            estimator.Invalidate("采样中断测试");
+            var saved = File.ReadAllText(path);
+            Require(saved.Contains("采样中断测试") || saved.Contains("\\u91C7"));
+            for (int i = 4; i <= 5; i++)
+            {
+                estimator = new QuotaTokenEstimator(path);
+                estimator.Observe(Snapshot(i,94), Usage(i,0) with { Epoch = "new-"+i });
+                var warming = estimator.Get(Window(94), Start.AddMinutes(i));
+                Require(warming.Segments == 3 && warming.RemainingTokens is null && warming.LastResetReason == "采样中断测试");
+            }
+            estimator.Observe(Snapshot(6,92), Usage(6,1000) with { Epoch = "new-5" });
+            Require(estimator.Get(Window(92), Start.AddMinutes(6)).Segments == 4);
+        }));
+        Check("same-period quota rebound after restart rejects the old samples", () => WithStorage(path =>
+        {
+            Trained(path);
+            var estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(4,99), Usage(4,0) with { Epoch = "new" });
+            var result = estimator.Get(Window(99), Start.AddMinutes(4));
+            Require(result.Segments == 0 && result.RemainingTokens is null);
+        }));
+        Check("period reset and rebound clear persisted history even while ledger is incomplete", () => WithStorage(path =>
+        {
+            foreach (string mode in new[] { "deadline", "identity", "rebound" })
+            {
+                var estimator = Trained(path);
+                var window = Window(mode == "rebound" ? 99 : 92);
+                var time = mode == "deadline" ? Start.AddHours(5) : Start.AddMinutes(4);
+                if (mode == "identity") window = window with { ResetsAt = Start.AddHours(6) };
+                estimator.Observe(new(time, [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(4,4000) with { ObservedAt = time, Health = SampleHealth.Partial });
+                estimator = new QuotaTokenEstimator(path);
+                estimator.Observe(new(time.AddMinutes(1), [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(5,0) with { ObservedAt = time.AddMinutes(1) });
+                Require(estimator.Get(window, time.AddMinutes(1)).Segments == 0);
+            }
+        }));
+        Check("old accounting format cannot seed the corrected collection scope", () => WithStorage(path =>
+        {
+            Trained(path);
+            File.WriteAllText(path, File.ReadAllText(path).Replace("\"Version\":2", "\"Version\":1"));
+            var estimator = new QuotaTokenEstimator(path);
+            Observe(estimator, 4, 94, 0);
+            Require(estimator.Get(Window(94), Start.AddMinutes(4)).Segments == 0);
+        }));
+        Check("zero-segment pause still persists a diagnostic reason", () => WithStorage(path =>
+        {
+            var estimator = new QuotaTokenEstimator(path);
+            Observe(estimator, 0, 100, 0);
+            estimator.Invalidate("记录暂不可读");
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var window = document.RootElement.GetProperty("Windows")[0];
+            Require(window.GetProperty("Segments").GetArrayLength() == 0);
+            Require(window.GetProperty("LastResetReason").GetString() == "记录暂不可读");
+            Require(window.GetProperty("LastResetAt").ValueKind == System.Text.Json.JsonValueKind.String);
+        }));
+        Check("an older period snapshot cannot reset the current-period history", () =>
+        {
+            var estimator = Trained();
+            var older = Window(96) with { ResetsAt = Start.AddHours(6) };
+            estimator.Observe(new(Start.AddMinutes(2), [older], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(2,2000));
+            var held = estimator.Get(Window(94), Start.AddMinutes(3));
+            Require(held.State == EstimateState.Stale && held.Segments == 3);
+        });
+        Check("missing reset identity pauses and resumes without erasing closed samples", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            var missing = Window(92) with { ResetsAt = null };
+            estimator.Observe(new(Start.AddMinutes(4), [missing], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(4,4000));
+            var paused = estimator.Get(missing, Start.AddMinutes(4));
+            Require(paused.State == EstimateState.Incomplete && paused.Segments == 3 && paused.RemainingTokens is null);
+            Require(paused.LastResetReason!.Contains("重置时间"));
+            estimator = new QuotaTokenEstimator(path);
+            Observe(estimator,5,92,0);
+            Require(estimator.Get(Window(92), Start.AddMinutes(5)).Segments == 3);
+            Require(estimator.Get(Window(92), Start.AddMinutes(5)).RemainingTokens is null);
+            Observe(estimator,6,90,1000);
+            Require(estimator.Get(Window(90), Start.AddMinutes(6)).Segments == 4);
+            Near(estimator.Get(Window(90), Start.AddMinutes(6)).RemainingTokens,45000);
+        }));
+        Check("restart preserves newer saved history when the first snapshot is an older period", () => WithStorage(path =>
+        {
+            Trained(path);
+            var estimator = new QuotaTokenEstimator(path);
+            var older = Window(96) with { ResetsAt = Start.AddHours(6) };
+            estimator.Observe(new(Start.AddMinutes(2), [older], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(2,2000));
+            using (var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)))
+                Require(saved.RootElement.GetProperty("Windows")[0].GetProperty("Segments").GetArrayLength() == 3);
+            estimator = new QuotaTokenEstimator(path);
+            Observe(estimator,4,94,0);
+            var held = estimator.Get(Window(94), Start.AddMinutes(4));
+            Require(held.Segments == 3 && held.RemainingTokens is null);
+            Observe(estimator,5,92,1000);
+            Near(estimator.Get(Window(92), Start.AddMinutes(5)).RemainingTokens,46000);
+        }));
         return failures;
 
         void Check(string name, Action test)

@@ -73,6 +73,9 @@
         <DockPanel><TextBlock Text="本机近期" DockPanel.Dock="Right" FontSize="9" Foreground="{StaticResource TextMuted}"/><TextBlock Text="预计剩余 TOKEN" FontFamily="Bahnschrift" FontSize="10" Foreground="#B8C590"/></DockPanel>
         <TextBlock x:Name="EstimatePanelValue" Text="校准中" FontFamily="Bahnschrift" FontSize="21" Foreground="{StaticResource Accent}" Margin="0,5,0,0"/>
         <TextBlock x:Name="EstimateMeta" Text="等待配对采样" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="EstimateProgress" Text="当前段下降 0 / 2 个百分点" FontSize="9" Foreground="#B8C590" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="EstimateReason" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+        <TextBlock x:Name="EstimateResetReason" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
        </StackPanel>
       </Border>
       <ListBox x:Name="QuotaList" MaxHeight="230" Margin="0,10,0,8" SelectionChanged="SelectQuota">

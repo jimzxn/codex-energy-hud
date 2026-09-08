@@ -113,10 +113,13 @@ public static class UsageLedgerTests
             now = now.AddSeconds(1);
             Append(root, Usage("root", "two", "regression", now, 1, 1));
             Check(Read().Health == SampleHealth.Partial, "cumulative counter regression pauses calibration");
-            Read();
+            var beforeTier = Read();
             now = now.AddSeconds(1);
             Append(root, Context("three", now, "gpt-6-astra", "priority"), Usage("root", "three", "tier-change", now, 1, 2));
-            Check(Read().Health == SampleHealth.Partial, "actual service-tier change restarts the usage epoch");
+            var changedTier = Read();
+            Check(changedTier.Health == SampleHealth.Fresh && changedTier.Epoch == beforeTier.Epoch
+                && changedTier.Counts.TotalTokens == beforeTier.Counts.TotalTokens + 1,
+                "valid service-tier change preserves the usage epoch and cumulative accounting");
 
             now = now.AddSeconds(1);
             Append(root, Context("spark", now, "gpt-5.3-codex-spark"), Usage("root", "spark", "spark-r1", now, 1, 3));
@@ -182,9 +185,158 @@ public static class UsageLedgerTests
             Console.Error.WriteLine("FAIL usage ledger fixture: " + ex.GetType().Name + ": " + ex.Message);
         }
         finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
-        return failures;
+        return failures + RunClassification();
     }
 
+    private static int RunClassification()
+    {
+        int failures = 0;
+        int checks = 0;
+        void Check(bool valid, string name)
+        {
+            checks++;
+            if (valid) return;
+            failures++;
+            Console.Error.WriteLine("FAIL usage ledger classification: " + name);
+        }
+        string home = Path.Combine(Path.GetTempPath(), "codex-hud-ledger-role-" + Guid.NewGuid().ToString("N"));
+        string sessions = Path.Combine(home, "sessions");
+        Directory.CreateDirectory(sessions);
+        string database = Path.Combine(home, "state_5.sqlite");
+        var now = DateTimeOffset.UtcNow.AddMinutes(-2);
+        try
+        {
+            Sql(database, "CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,source TEXT,archived INTEGER,model TEXT,reasoning_effort TEXT,model_provider TEXT,updated_at INTEGER,thread_source TEXT);");
+            string AddTask(string id, string? role = null, string model = "gpt-6-astra", bool initial = false)
+            {
+                string path = Path.Combine(sessions, id + ".jsonl");
+                File.WriteAllText(path, Meta(id, initial ? now.AddDays(-1) : now) + "\n", new UTF8Encoding(false));
+                Sql(database, $"INSERT INTO threads VALUES({Q(id)},{Q(path)},'subagent',0,{Q(model)},'high','openai',0,{(role is null ? "NULL" : Q(role))});");
+                return path;
+            }
+            string root = AddTask("z-main", initial: true);
+            string child = AddTask("z-child", "subagent", initial: true);
+            string review = AddTask("review", "guardian_review", "codex-auto-review", initial: true);
+            // More internal rows than the source limit must not crowd out any workload row.
+            Sql(database, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<4200) "
+                + "INSERT INTO threads SELECT 'a-internal-'||i,'/unavailable/internal.jsonl','subagent',1,'codex-auto-review','low','openai',0,'guardian_review' FROM n;");
+            var provider = new UsageLedgerProvider(home, () => now);
+            UsageLedgerSnapshot Read() => provider.ReadAsync().GetAwaiter().GetResult();
+            var baseline = Read();
+            Check(baseline.Health == SampleHealth.Fresh && baseline.ObservedThreads == 2 && baseline.Counts.TotalTokens == 0,
+                "SQL role exclusion precedes LIMIT and ignores unreadable internal history while retaining ordinary subagents");
+            var estimator = new QuotaTokenEstimator();
+            var resetAt = now.AddHours(5);
+            QuotaWindow Window(double remaining) => new("codex-primary", "codex", "fixture", "primary", 300, remaining, resetAt);
+            QuotaSnapshot Quota(double remaining) => new(now, new[] { Window(remaining) }, SampleHealth.Fresh) { AccountKey = "fixture-account" };
+            estimator.Observe(Quota(100), baseline);
+            UsageLedgerSnapshot latest = baseline;
+            for (int step = 1; step <= 3; step++)
+            {
+                now = now.AddSeconds(1);
+                Append(root, Context("work", now), Usage("z-main", "work", "main-" + step, now, 10, step * 10));
+                Append(child, Context("work", now), Usage("z-child", "work", "child-" + step, now, 20, step * 20));
+                Append(review, Context("review", now, "codex-auto-review", effort: "low"),
+                    Usage("review", "review", "review-" + step, now, 100000, step * 100000));
+                latest = Read();
+                Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == step * 30
+                    && latest.ModelMix?.Contains("codex-auto-review") == false,
+                    "interleaved guardian usage does not enter workload counts or reset its epoch, step " + step);
+                estimator.Observe(Quota(100 - 3 * step), latest);
+            }
+            var calibrated = estimator.Get(Window(91), now);
+            Check(calibrated.Segments == 3 && calibrated.RemainingTokens is > 0,
+                "three real workload segments calibrate while internal approvals continue");
+            now = now.AddSeconds(1);
+            using (var locked = new FileStream(review, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Append(root, Usage("z-main", "work", "main-locked-review", now, 10, 40));
+                latest = Read();
+                Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 100,
+                    "inaccessible guardian log cannot block fresh workload capture");
+            }
+            now = now.AddSeconds(1);
+            Sql(database, "UPDATE threads SET model='named-custom-model',reasoning_effort='low',model_provider='external' WHERE id='review';");
+            File.WriteAllText(review, new string('x', UsageLedgerCursor.MaximumRead + 10), new UTF8Encoding(false));
+            Append(root, Context("new-model", now, "gpt-5.5", "priority", "low"), Usage("z-main", "new-model", "model-change", now, 5, 45));
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 105
+                && latest.ModelMix?.Contains("model:gpt-5.5/effort:low/tier:priority/provider:openai") == true,
+                "normal same-pool model and effort changes preserve counts despite changed or malformed internal records");
+            now = now.AddSeconds(1);
+            Append(child, Context("effort-change", now, effort: "ultra"), Usage("z-child", "effort-change", "effort-r1", now, 7, 67));
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 112,
+                "ordinary subagent effort change preserves cumulative workload usage");
+            File.Delete(review);
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 112,
+                "deleted internal log cannot manufacture a capture gap");
+            Sql(database, "DELETE FROM threads WHERE id='review';");
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 112,
+                "deleted internal index row cannot manufacture a capture gap");
+
+            now = now.AddSeconds(1);
+            string reclassified = AddTask("reclassified");
+            Append(reclassified, Context("first", now), Usage("reclassified", "first", "first-r1", now, 10, 10));
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Counts.TotalTokens == 122,
+                "ordinary task remains included before an explicit internal classification exists");
+            Sql(database, "UPDATE threads SET thread_source='guardian_review',model='codex-auto-review' WHERE id='reclassified';");
+            File.Delete(reclassified);
+            latest = Read();
+            Check(latest.Health == SampleHealth.Fresh && latest.Epoch == baseline.Epoch && latest.Counts.TotalTokens == 122,
+                "existing cursor becoming guardian is removed without a gap or counter reset");
+
+            now = now.AddSeconds(1);
+            string unclassifiedReview = AddTask("unclassified-review", model: "codex-auto-review");
+            Append(unclassifiedReview, Context("first", now, "codex-auto-review"), Usage("unclassified-review", "first", "first-r1", now, 100, 100));
+            var ambiguous = Read();
+            Check(ambiguous.Health == SampleHealth.Partial && ambiguous.Counts.TotalTokens == 0 && ambiguous.Epoch != baseline.Epoch,
+                "a review-like model name without the explicit role remains an unmapped model");
+            Sql(database, "UPDATE threads SET thread_source='guardian_review' WHERE id='unclassified-review';");
+            var classified = Read();
+            Check(classified.Health == SampleHealth.Fresh && classified.Epoch == ambiguous.Epoch && classified.Counts.TotalTokens == 0,
+                "new explicit internal classification removes only that task's pending ambiguity without adding tokens");
+            now = now.AddSeconds(1);
+            Append(unclassifiedReview, Usage("unclassified-review", "first", "only-internal", now, 100, 200));
+            Check(Read().Counts.TotalTokens == 0, "internal activity alone never synthesizes workload token increments");
+
+            now = now.AddSeconds(1);
+            string secondReview = AddTask("unclassified-review-2", model: "codex-auto-review");
+            string spark = AddTask("spark", model: "gpt-5.3-codex-spark");
+            Append(secondReview, Context("first", now, "codex-auto-review"), Usage("unclassified-review-2", "first", "first-r1", now, 100, 100));
+            Append(spark, Context("first", now, "gpt-5.3-codex-spark"), Usage("spark", "first", "first-r1", now, 10, 10));
+            var twoAmbiguous = Read();
+            Sql(database, "UPDATE threads SET thread_source='guardian_review' WHERE id='unclassified-review-2';");
+            var remainingAmbiguous = Read();
+            Check(remainingAmbiguous.Health == SampleHealth.Partial && remainingAmbiguous.Epoch == twoAmbiguous.Epoch
+                && remainingAmbiguous.Detail?.Contains("额度池") == true,
+                "excluding a newly classified guardian cannot remove another model's unresolved pool protection");
+            now = now.AddMinutes(11);
+            var afterAmbiguity = Read();
+            Check(afterAmbiguity.Health == SampleHealth.Fresh, "separate-model protection expires after its existing observation window");
+            for (int profile = 1; profile <= 33; profile++)
+            {
+                now = now.AddSeconds(1);
+                Append(root, Context("profile-" + profile, now, effort: "fixture-effort-" + profile),
+                    Usage("z-main", "profile-" + profile, "profile-response-" + profile, now, 1, 45 + profile));
+            }
+            var manyProfiles = Read();
+            Check(manyProfiles.Health == SampleHealth.Fresh && manyProfiles.Epoch == afterAmbiguity.Epoch
+                && manyProfiles.Counts.TotalTokens == afterAmbiguity.Counts.TotalTokens + 33,
+                "bounded profile metadata retention cannot reset complete cumulative token accounting");
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            Console.Error.WriteLine("FAIL usage ledger classification fixture: " + ex.GetType().Name + ": " + ex.Message);
+        }
+        finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
+        Console.WriteLine($"Usage ledger classification: {checks} checks, {failures} failure(s)");
+        return failures;
+    }
     public static async Task<int> LiveAsync()
     {
         var provider = new UsageLedgerProvider(CodexLocator.ResolveHome());
@@ -209,8 +361,8 @@ public static class UsageLedgerTests
         File.AppendAllText(path, string.Join('\n', lines) + "\n", new UTF8Encoding(false));
     private static string Meta(string id, DateTimeOffset at) => JsonSerializer.Serialize(new
         { timestamp = at, type = "session_meta", payload = new { id } });
-    private static string Context(string turn, DateTimeOffset at, string model = "gpt-6-astra", string? tier = null) =>
-        JsonSerializer.Serialize(new { timestamp = at, type = "turn_context", payload = new { turn_id = turn, model, effort = "high", service_tier = tier } });
+    private static string Context(string turn, DateTimeOffset at, string model = "gpt-6-astra", string? tier = null, string effort = "high") =>
+        JsonSerializer.Serialize(new { timestamp = at, type = "turn_context", payload = new { turn_id = turn, model, effort, service_tier = tier } });
     private static string Usage(string thread, string turn, string response, DateTimeOffset at, long usage, long cumulative) =>
         JsonSerializer.Serialize(new
         {

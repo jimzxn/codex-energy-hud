@@ -30,7 +30,7 @@ public sealed class UsageLedgerProvider
     private TokenCounts _counts = Zero;
     private bool _initialized;
     private bool _failed;
-    private DateTimeOffset? _ambiguousPoolUntil;
+    private readonly Dictionary<string, DateTimeOffset> _ambiguousPools = new(StringComparer.Ordinal);
     private static readonly TokenCounts Zero = new(0, 0, 0, 0, 0, 0);
 
     public UsageLedgerProvider(string codexHome) : this(codexHome, () => DateTimeOffset.UtcNow) { }
@@ -62,12 +62,16 @@ public sealed class UsageLedgerProvider
             var columns = state.Columns("threads");
             if (!columns.Contains("id") || !columns.Contains("rollout_path"))
                 throw new IOException("Local thread index schema unavailable.");
-            // Never exclude archived rows or agent sources. Paths establish the local collection.
+            // Ordinary agents and archived tasks remain included. Explicit internal review roles
+            // are outside this workload ledger; this classification says nothing about billing.
             string modelColumn = columns.Contains("model") ? "model" : "NULL AS model";
             string effortColumn = columns.Contains("reasoning_effort") ? "reasoning_effort" : "NULL AS reasoning_effort";
             string providerColumn = columns.Contains("model_provider") ? "model_provider" : "NULL AS model_provider";
             string updatedColumn = columns.Contains("updated_at_ms") ? "updated_at_ms AS ledger_updated" : columns.Contains("updated_at") ? "updated_at AS ledger_updated" : "NULL AS ledger_updated";
-            var rows = state.Query($"SELECT id, rollout_path, {modelColumn}, {effortColumn}, {providerColumn}, {updatedColumn} FROM threads ORDER BY id LIMIT {MaximumThreads + 1}");
+            bool hasThreadSource = columns.Contains("thread_source");
+            string workloadFilter = hasThreadSource ? " WHERE thread_source IS NULL OR thread_source <> 'guardian_review'" : "";
+            // Filter before LIMIT so internal-review history cannot displace user tasks.
+            var rows = state.Query($"SELECT id, rollout_path, {modelColumn}, {effortColumn}, {providerColumn}, {updatedColumn} FROM threads{workloadFilter} ORDER BY id LIMIT {MaximumThreads + 1}");
             bool gap = _failed;
             bool complete = rows.Count <= MaximumThreads;
             int budget = ReadBudget;
@@ -104,14 +108,14 @@ public sealed class UsageLedgerProvider
                 var result = cursor.Read(path, _started, now, ref budget);
                 if (result.State == LedgerReadState.Gap) gap = true;
                 if (result.State == LedgerReadState.Incomplete) complete = false;
-                if (result.ModelChanged) gap = true;
+                // A valid same-pool profile change does not break cumulative token accounting.
                 foreach (var increment in result.Increments)
                 {
                     if (!MainPoolProfile(increment.Profile))
                     {
                         // The record has no limitId. A known separate model family cannot be
                         // silently combined with the main Codex account pool.
-                        _ambiguousPoolUntil = now.AddMinutes(10);
+                        _ambiguousPools[id] = now.AddMinutes(10);
                         gap = true;
                         continue;
                     }
@@ -120,16 +124,27 @@ public sealed class UsageLedgerProvider
                     _profiles[increment.Profile] = now;
                 }
             }
-            if (_cursors.Keys.Any(id => !seen.Contains(id))) gap = true;
-            foreach (var id in _cursors.Keys.Where(id => !seen.Contains(id)).ToArray()) _cursors.Remove(id);
+            foreach (var id in _cursors.Keys.Where(id => !seen.Contains(id)).ToArray())
+            {
+                bool internalReview = hasThreadSource && state.Query(
+                    "SELECT id FROM threads WHERE id=?1 AND thread_source='guardian_review'", id).Count > 0;
+                if (internalReview) _ambiguousPools.Remove(id);
+                else gap = true;
+                _cursors.Remove(id);
+            }
             foreach (var id in _historicalUnavailable.Keys.Where(id => !indexed.Contains(id)).ToArray()) _historicalUnavailable.Remove(id);
             foreach (var profile in _profiles.Where(item => now - item.Value > TimeSpan.FromMinutes(10)).Select(item => item.Key).ToArray())
                 _profiles.Remove(profile);
-            if (_profiles.Count > 32) { _profiles.Clear(); gap = true; }
+            // Profile retention is metadata bookkeeping, not a gap in the numeric ledger.
+            if (_profiles.Count > 32)
+                foreach (var profile in _profiles.OrderBy(pair => pair.Value).Take(_profiles.Count - 32).Select(pair => pair.Key).ToArray())
+                    _profiles.Remove(profile);
             _initialized = true;
             _failed = false;
             if (gap) ResetEpoch(now);
-            bool ambiguous = _ambiguousPoolUntil > now;
+            foreach (var id in _ambiguousPools.Where(pair => pair.Value <= now).Select(pair => pair.Key).ToArray())
+                _ambiguousPools.Remove(id);
+            bool ambiguous = _ambiguousPools.Count > 0;
             return new(now, _epoch, _counts,
                 gap || !complete || ambiguous ? SampleHealth.Partial : SampleHealth.Fresh,
                 seen.Count, ProfileMix(), ambiguous ? "部分模型无法归属额度池" : gap ? "已重新建立采样基线"

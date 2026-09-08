@@ -14,6 +14,7 @@ $widgetEvidence += @('v1.1.0\build-tests.txt','v1.1.0\disk-live.json','v1.1.0\di
 $widgetEvidence += @('v1.2.0\build-tests.txt','v1.2.0\tokens-live.json','v1.2.0\ui-first\ui-check.json','v1.2.0\ui-final\ui-check.json','v1.2.0\process-association.json','v1.2.0\process-association-host.json','v1.2.0\smoke\launch.json','v1.2.0\smoke\soak-result.json','v1.2.0\smoke\resources.jsonl','v1.2.0\smoke\verify-release.json')
 $widgetEvidence += @('v1.3.0\build-first.txt','v1.3.0\build-tests.txt','v1.3.0\ledger-live.json','v1.3.0\ui-final\ui-check.json','v1.3.0\smoke\launch.json','v1.3.0\smoke\soak-result.json','v1.3.0\smoke\resources.jsonl','v1.3.0\smoke\verify-release.json')
 $widgetEvidence += @('v1.4.0\build-tests.txt','v1.4.0\ui-release\ui-check.json','v1.4.0\smoke-final\launch.json','v1.4.0\smoke-final\soak-result.json','v1.4.0\smoke-final\resources.jsonl','v1.4.0\smoke-final\verify-release.json')
+$widgetEvidence += @('v1.4.1\build-tests.txt','v1.4.1\ledger-live.json','v1.4.1\ui-release\ui-check.json','v1.4.1\smoke\launch.json','v1.4.1\smoke\soak-result.json','v1.4.1\smoke\resources.jsonl','v1.4.1\smoke\verify-release.json')
 foreach ($widgetRelative in $widgetEvidence) {
     $widgetSource = Join-Path (Join-Path $widgetArtifacts 'validation') $widgetRelative
     if (Test-Path -LiteralPath $widgetSource) {
