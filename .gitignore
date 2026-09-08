@@ -1,0 +1,21 @@
+.tools/
+.cache/
+**/bin/
+**/obj/
+artifacts/
+work/
+.vs/
+*.user
+
+# Local agent configuration and credentials
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+
+# Local acceptance evidence and screenshots with live task/account data
+docs/preview*.png
+docs/validation*.md
+docs/hardware-validation.md
+docs/process-association.md
