@@ -58,7 +58,7 @@ public static class QuotaTransportTests
                     // More than a pipe buffer: coupled stderr/stdout consumption deadlocks here.
                     Console.Error.Write(new string('x', 131072));
                     Console.Error.Flush();
-                    Write(new { id, result = new { rateLimits = new { primary = new { usedPercent = reads == 1 ? 12.5 : 25.0, windowDurationMins = 300 } } } });
+                    Write(new { id, result = new { rateLimits = new { primary = new { usedPercent = reads == 1 ? 12.5 : 25.0, windowDurationMins = 300 } }, rateLimitResetCredits = new { availableCount = reads == 1 ? 3 : 2 } } });
                 }
                 else Write(new { id, error = new { code = -1, message = "Unauthorized login required fixture" } });
             }
@@ -81,17 +81,21 @@ public static class QuotaTransportTests
                 var first = await provider.ReadAsync();
                 pid = provider.OwnedProcessId;
                 Require(first.Health == SampleHealth.Fresh && first.Windows.FirstOrDefault()?.RemainingPercent == 87.5);
+                Require(first.ResetCredits.AvailableCount == 3 && first.ResetCredits.Health == SampleHealth.Fresh);
                 Require(first.AccountKey is { Length: 64 } && first.AccountKey.All(Uri.IsHexDigit));
                 Require(pid.HasValue && Alive(pid.Value));
                 var failed = await provider.ReadAsync();
                 Require(failed.Health == SampleHealth.Stale && failed.ObservedAt == first.ObservedAt);
                 Require(failed.Windows[0].RemainingPercent == 87.5 && provider.OwnedProcessId is null);
                 Require(failed.AccountKey is null);
+                Require(failed.ResetCredits.AvailableCount == 3 && failed.ResetCredits.Health == SampleHealth.Stale
+                    && failed.ResetCredits.ObservedAt == first.ResetCredits.ObservedAt);
                 Require(failed.Message!.Contains("登录") && !failed.Message.Contains("Unauthorized"));
                 Require(pid is { } previousPid && !Alive(previousPid));
                 var recovered = await provider.ReadAsync();
                 Require(recovered.Health == SampleHealth.Fresh && recovered.ObservedAt >= first.ObservedAt);
                 Require(recovered.AccountKey == first.AccountKey);
+                Require(recovered.ResetCredits.AvailableCount == 3 && recovered.ResetCredits.Health == SampleHealth.Fresh);
                 pid = provider.OwnedProcessId;
             }
             Require(pid.HasValue && !Alive(pid.Value));
@@ -103,6 +107,7 @@ public static class QuotaTransportTests
             var changed = await provider.ReadAsync();
             Require(first.AccountKey is not null && changed.AccountKey is not null && first.AccountKey != changed.AccountKey);
             Require(changed.Health == SampleHealth.Fresh && changed.Windows[0].RemainingPercent == 75);
+            Require(changed.ResetCredits.AvailableCount == 2);
         });
         await Check("account change does not reuse previous account's quota after failure", async () =>
         {
@@ -111,12 +116,14 @@ public static class QuotaTransportTests
             Require(first.AccountKey is not null);
             var changed = await provider.ReadAsync();
             Require(changed.Health == SampleHealth.Unavailable && changed.Windows.Count == 0 && changed.AccountKey is null);
+            Require(changed.ResetCredits.AvailableCount is null);
         });
         await Check("identity changing during quota read is never attributed", async () =>
         {
             await using var provider = Fixture("account-race");
             var raced = await provider.ReadAsync();
             Require(raced.Health == SampleHealth.Fresh && raced.Windows[0].RemainingPercent == 87.5 && raced.AccountKey is null);
+            Require(raced.ResetCredits.AvailableCount is null);
             var stable = await provider.ReadAsync();
             Require(stable.Health == SampleHealth.Fresh && stable.AccountKey is not null);
         });
@@ -127,6 +134,7 @@ public static class QuotaTransportTests
             Require(raced.Health == SampleHealth.Fresh && raced.AccountKey is null);
             var failed = await provider.ReadAsync();
             Require(failed.Health == SampleHealth.Unavailable && failed.Windows.Count == 0 && failed.AccountKey is null);
+            Require(failed.ResetCredits.AvailableCount is null);
         });
         foreach (var scenario in new[] { "identity-unavailable", "identity-null", "identity-no-email", "identity-hang" })
         {

@@ -330,6 +330,7 @@ public partial class MainWindow : Window
     internal static string Period(int? minutes) => minutes switch { null => "周期未知", <= 0 => "周期未知", 10080 => "每周额度", 1440 => "24 小时额度", var m when m % 1440 == 0 => $"{m / 1440} 天额度", var m when m % 60 == 0 => $"{m / 60} 小时额度", var m => $"{m} 分钟额度" };
     private void UpdateCountdown()
     {
+        UpdateResetCredits();
         var q = _quotaData;
         if (q == null) return;
         var w = q.Windows.FirstOrDefault(w => w.Key == _settings.SelectedQuotaKey);
@@ -581,6 +582,7 @@ public partial class MainWindow : Window
         _activityData = originalActivity; UpdateActivity();
         RunExtendedUiChecks(results, directory);
         RunEstimateUiChecks(results, directory);
+        RunResetCreditUiChecks(results, directory);
         results.Add(new { scenario = "disk-rate-format", passed = ByteRate(new MetricSample(0, checkNow)) == "0 B/s"
             && ByteRate(new MetricSample(1048576, checkNow)) == "1.00 MiB/s"
             && ByteRate(MetricSample.Missing()) == "—" && ByteRate(new MetricSample(1024, checkNow, SampleHealth.Stale)).EndsWith("·") });

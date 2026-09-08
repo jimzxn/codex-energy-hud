@@ -93,6 +93,31 @@ public static class QuotaTests
             try { Parse("{}"); throw new InvalidOperationException("Should reject missing quota fields."); }
             catch (JsonException) { }
         });
+        Check("reset cards use the account-level authoritative count, not detail length or paid balance", () =>
+        {
+            var sample = Parse("""{"rateLimits":{"credits":{"balance":"900"},"primary":{"usedPercent":5,"windowDurationMins":300}},"rateLimitResetCredits":{"availableCount":3,"credits":[{"id":"fixture-only"}]}}""");
+            Require(sample.ResetCredits.AvailableCount == 3 && sample.ResetCredits.Health == SampleHealth.Fresh);
+            Require(sample.ResetCredits.ObservedAt == DateTimeOffset.UnixEpoch);
+            var zero = Parse("""{"rateLimits":null,"rateLimitResetCredits":{"availableCount":0,"credits":null}}""");
+            Require(zero.ResetCredits.AvailableCount == 0 && zero.ResetCredits.Health == SampleHealth.Fresh);
+            Require(zero.Health == SampleHealth.Unavailable);
+        });
+        Check("unknown or malformed reset inventory never becomes zero or borrows credit rows", () =>
+        {
+            foreach (var value in new[] { "null", "{}", "[]", "17", "{\"availableCount\":null}", "{\"availableCount\":\"3\"}",
+                "{\"availableCount\":-1}", "{\"availableCount\":1.5}", "{\"availableCount\":2147483648}", "{\"credits\":[{},{}]}" })
+            {
+                var sample = Parse("{\"rateLimits\":null,\"rateLimitResetCredits\":" + value + "}");
+                Require(sample.ResetCredits.AvailableCount is null && sample.ResetCredits.Health == SampleHealth.Unavailable);
+            }
+            var paid = Parse("""{"rateLimits":{"credits":{"balance":"3","hasCredits":true}}}""");
+            Require(paid.ResetCredits.AvailableCount is null);
+        });
+        Check("reset inventory is independent of the selected pool and survives RPC envelopes", () =>
+        {
+            var sample = Parse("""{"id":4,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":4}},"other":{"primary":{"usedPercent":1}}},"rateLimitResetCredits":{"availableCount":7,"credits":[]}}}""");
+            Require(sample.Windows.Count == 2 && sample.ResetCredits.AvailableCount == 7);
+        });
         return failures;
 
         void Check(string name, Action test)

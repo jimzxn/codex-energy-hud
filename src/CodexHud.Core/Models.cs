@@ -7,9 +7,14 @@ public sealed record MetricSample(double? Value, DateTimeOffset? ObservedAt, Sam
     public static MetricSample Missing(string? detail = null) => new(null, null, SampleHealth.Unavailable, detail);
 }
 public sealed record QuotaWindow(string Key, string LimitId, string Label, string Slot, int? WindowMinutes, double? RemainingPercent, DateTimeOffset? ResetsAt);
+public sealed record ResetCreditSample(int? AvailableCount, DateTimeOffset? ObservedAt, SampleHealth Health)
+{
+    public static ResetCreditSample Missing { get; } = new(null, null, SampleHealth.Unavailable);
+}
 public sealed record QuotaSnapshot(DateTimeOffset ObservedAt, IReadOnlyList<QuotaWindow> Windows, SampleHealth Health, string? Message = null)
 {
     public string? AccountKey { get; init; }
+    public ResetCreditSample ResetCredits { get; init; } = ResetCreditSample.Missing;
 }
 public sealed record ProcessIdentity(int Pid, long CreationTime);
 public sealed record HardwareSnapshot(DateTimeOffset ObservedAt, MetricSample SystemCpu, MetricSample CodexCpu,

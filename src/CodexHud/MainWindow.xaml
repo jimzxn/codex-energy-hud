@@ -78,6 +78,15 @@
         <TextBlock x:Name="EstimateResetReason" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
        </StackPanel>
       </Border>
+      <Border x:Name="ResetCreditsCard" Background="#161F19" BorderBrush="#394536" BorderThickness="1" Padding="10,6" Margin="0,8,0,0" ToolTipService.ShowDuration="30000">
+       <DockPanel LastChildFill="True">
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+         <TextBlock x:Name="ResetCreditsStatus" FontSize="9" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
+         <TextBlock x:Name="ResetCreditsValue" Text="—" FontSize="14" FontFamily="Bahnschrift, Microsoft YaHei UI" Foreground="#B8C590" VerticalAlignment="Center"/>
+        </StackPanel>
+        <TextBlock Text="重置卡" FontSize="10" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center"/>
+       </DockPanel>
+      </Border>
       <ListBox x:Name="QuotaList" MaxHeight="230" Margin="0,10,0,8" SelectionChanged="SelectQuota">
        <ListBox.ItemTemplate><DataTemplate><StackPanel><DockPanel><TextBlock Text="{Binding Percent}" DockPanel.Dock="Right" Foreground="{StaticResource Accent}" FontFamily="Bahnschrift" FontSize="17" Margin="8,0,0,0"/><TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="12"/></DockPanel><TextBlock Text="{Binding Detail}" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,4,0,5"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
       </ListBox>

@@ -63,9 +63,11 @@ public sealed class QuotaProvider : IQuotaProvider
             {
                 AccountKey = accountBefore is not null && accountBefore == accountAfter ? accountBefore : null
             };
+            var accountSwitched = accountBefore is not null && accountAfter is not null && accountBefore != accountAfter;
+            if (accountSwitched) sample = sample with { ResetCredits = ResetCreditSample.Missing };
             // A detected switch makes this in-flight read ambiguous; show its actual response,
             // but never retain it as a fallback for the account observed afterwards.
-            _lastSuccess = accountBefore is not null && accountAfter is not null && accountBefore != accountAfter
+            _lastSuccess = accountSwitched
                 ? null : sample;
             return sample;
         }
@@ -94,7 +96,9 @@ public sealed class QuotaProvider : IQuotaProvider
     }
 
     private QuotaSnapshot Failed(string message) => _lastSuccess is { } previous
-        ? previous with { Health = SampleHealth.Stale, Message = message, AccountKey = null }
+        ? previous with { Health = SampleHealth.Stale, Message = message, AccountKey = null,
+            ResetCredits = previous.ResetCredits.AvailableCount.HasValue
+                ? previous.ResetCredits with { Health = SampleHealth.Stale } : ResetCreditSample.Missing }
         : new(DateTimeOffset.UtcNow, Array.Empty<QuotaWindow>(), SampleHealth.Unavailable, message);
 
     private void ObserveAccount(string? accountKey)
@@ -165,7 +169,19 @@ public sealed class QuotaProvider : IQuotaProvider
             : ordered.Any(window => !window.RemainingPercent.HasValue || !window.WindowMinutes.HasValue) ? SampleHealth.Partial : SampleHealth.Fresh;
         return new(observedAt, ordered, health,
             available == 0 ? "服务未返回可用额度，请确认 Codex 登录状态；缺失值显示为 —。"
-            : health == SampleHealth.Partial ? "部分额度字段尚不可用。" : null);
+            : health == SampleHealth.Partial ? "部分额度字段尚不可用。" : null)
+        { ResetCredits = ParseResetCredits(payload, observedAt) };
+    }
+
+    private static ResetCreditSample ParseResetCredits(JsonElement payload, DateTimeOffset observedAt)
+    {
+        // This is an account-level reset inventory, not the paid balance in rateLimits.credits.
+        // Detail rows may be omitted or capped: only availableCount is authoritative.
+        if (payload.TryGetProperty("rateLimitResetCredits", out var resets) && resets.ValueKind == JsonValueKind.Object
+            && resets.TryGetProperty("availableCount", out var count) && count.ValueKind == JsonValueKind.Number
+            && count.TryGetInt32(out int available) && available >= 0)
+            return new(available, observedAt, SampleHealth.Fresh);
+        return ResetCreditSample.Missing;
     }
 
     private static void AddPool(List<QuotaWindow> windows, JsonElement pool, string fallbackId)
