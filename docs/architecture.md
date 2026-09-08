@@ -8,6 +8,8 @@
 | --- | --- |
 | `QuotaProvider` | 管理专属隐藏 app-server，通过只读账户接口采集额度与校准所需身份信息 |
 | `ActivityProvider` | 读取本地任务元数据和增量日志，提供活动证据、轮次时长与任务自身 Token |
+| `DesktopActivityProvider` | 只读订阅桌面实时状态，校验连续修订号，补充审批、输入等待与轮次状态 |
+| `TaskNoticeTracker` | 按任务、轮次、请求去重，识别监控期间的新完成并抑制历史提醒 |
 | `UsageLedgerProvider` | 独立采集本机新增响应 Token，包含归档任务及独立子任务，避免 UI 筛选影响估算 |
 | `QuotaTokenEstimator` | 按账户、额度池与周期对齐 Token 和额度变化，管理校准、经验范围及历史分段 |
 | `HardwareProvider` | 采集整机及 Codex 进程组 CPU/GPU、内存和整机物理磁盘吞吐 |

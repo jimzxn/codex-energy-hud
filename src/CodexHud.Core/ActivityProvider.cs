@@ -95,6 +95,7 @@ public sealed class ActivityProvider : IActivityProvider
                 tasks.Add(new(id, title, status, evidenceAt, merged.StartedAt,
                     baseline.Status is null ? "本地日志推断" : "本地历史与日志推断", merged.EndedAt)
                 {
+                    TurnId = merged.TurnId,
                     TokenUsage = cursor.Tokens.Snapshot(merged.TurnId, now, readable && cursor.IsCaughtUp,
                         status is ActivityState.ExecutionEvidence or ActivityState.Unconfirmed)
                 });

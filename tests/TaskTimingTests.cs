@@ -22,6 +22,37 @@ public static class TaskTimingTests
         Check(TaskTiming.Describe(task, snapshot, now.AddSeconds(1)).Elapsed == TimeSpan.FromSeconds(76),
             "live timer advances without another provider read");
 
+        foreach (var waitingState in new[] { ActivityState.AwaitingApproval, ActivityState.AwaitingInput })
+        {
+            var waiting = task with { State = waitingState };
+            var freshWait = TaskTiming.Describe(waiting, snapshot with { Health = SampleHealth.Fresh }, now);
+            Check(freshWait.IsAdvancing && freshWait.Label == "本轮已用" && freshWait.Elapsed == TimeSpan.FromSeconds(75),
+                waitingState + " includes a fresh confirmed wait in turn wall duration");
+            var partialWait = TaskTiming.Describe(waiting, snapshot, now.AddSeconds(1));
+            Check(partialWait.IsAdvancing && partialWait.Elapsed == TimeSpan.FromSeconds(76),
+                waitingState + " remains advancing with a valid partial observation");
+            foreach (var unavailable in new[]
+            {
+                snapshot with { Health = SampleHealth.Stale }, snapshot with { AppPresent = false }
+            })
+            {
+                var stopped = TaskTiming.Describe(waiting, unavailable, now.AddSeconds(1));
+                Check(!stopped.IsAdvancing && stopped.Label == "截至证据" && stopped.Elapsed == TimeSpan.FromSeconds(65),
+                    waitingState + " freezes at evidence after stale read or desktop exit");
+            }
+            var expired = TaskTiming.Describe(waiting, snapshot, now.AddSeconds(121));
+            Check(!expired.IsAdvancing && expired.Elapsed == TimeSpan.FromSeconds(65),
+                waitingState + " cannot keep advancing without a refreshed observation");
+            var oldWait = waiting with { StartedAt = now.AddMinutes(-5), EvidenceAt = now.AddSeconds(-121) };
+            var oldDisplay = TaskTiming.Describe(oldWait, snapshot, now);
+            Check(!oldDisplay.IsAdvancing && oldDisplay.Elapsed == TimeSpan.FromSeconds(179),
+                waitingState + " requires recent task evidence even with a fresh snapshot");
+            Check(TaskTiming.Describe(oldWait with { EvidenceAt = now.AddSeconds(-120) }, snapshot, now).IsAdvancing,
+                waitingState + " accepts the 120-second evidence boundary");
+            var fallback = TaskTiming.Describe(waiting with { State = ActivityState.Unconfirmed }, snapshot, now);
+            Check(!fallback.IsAdvancing && fallback.Elapsed == TimeSpan.FromSeconds(65),
+                waitingState + " freezes when a live status falls back to unconfirmed local evidence");
+        }
         foreach (var state in new[] { ActivityState.Completed, ActivityState.Interrupted })
         {
             var ended = task with { State = state, EndedAt = now.AddSeconds(-12) };

@@ -20,14 +20,20 @@ public sealed record HardwareSnapshot(DateTimeOffset ObservedAt, MetricSample Sy
     public MetricSample SystemDiskReadBytesPerSecond { get; init; } = MetricSample.Missing("等待磁盘采样");
     public MetricSample SystemDiskWriteBytesPerSecond { get; init; } = MetricSample.Missing("等待磁盘采样");
 }
-public enum ActivityState { ExecutionEvidence, Unconfirmed, Completed, Interrupted }
+public enum ActivityState { ExecutionEvidence, Unconfirmed, Completed, Interrupted, AwaitingApproval, AwaitingInput }
 public sealed record TaskActivity(string Id, string Title, ActivityState State, DateTimeOffset? EvidenceAt, DateTimeOffset? StartedAt, string Source,
     DateTimeOffset? EndedAt = null)
 {
     public TaskTokenUsage TokenUsage { get; init; } = TaskTokenUsage.Missing;
+    public string? TurnId { get; init; }
+    public string? AttentionId { get; init; }
 }
 public sealed record ActivitySnapshot(DateTimeOffset ObservedAt, bool AppPresent, IReadOnlyList<TaskActivity> Tasks,
-    SampleHealth Health, string? Message = null);
+    SampleHealth Health, string? Message = null)
+{
+    public SampleHealth LiveHealth { get; init; } = SampleHealth.Unavailable;
+    public int LiveTaskCount { get; init; }
+}
 
 public interface IQuotaProvider : IAsyncDisposable
 {

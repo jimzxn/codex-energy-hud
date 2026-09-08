@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly IQuotaProvider _quota;
     private readonly IHardwareProvider _hardware;
     private readonly IActivityProvider _activity;
+    private readonly DesktopActivityProvider _desktopActivity = new();
     private readonly UsageLedgerProvider _usageLedger;
     private readonly QuotaTokenEstimator _tokenEstimator;
     private UsageLedgerSnapshot? _usageData;
@@ -68,6 +69,9 @@ public partial class MainWindow : Window
         CodexDirectoryText.Text = codexHome;
         TopmostCheck.IsChecked = _settings.AlwaysOnTop;
         LockCheck.IsChecked = _settings.PositionLocked;
+        AttentionNotifyCheck.IsChecked = _settings.AttentionNotifications;
+        CompletionNotifyCheck.IsChecked = _settings.CompletionNotifications;
+        NotificationSoundCheck.IsChecked = _settings.NotificationSound;
         StartupCheck.IsChecked = WindowPlacementService.StartupEnabled();
         ScaleSlider.Value = _settings.Scale;
         OpacitySlider.Value = _settings.PanelOpacity;
@@ -137,9 +141,10 @@ public partial class MainWindow : Window
         {
             try
             {
-                var data = await _activity.ReadAsync(_appPresent, _stop.Token);
+                var local = await _activity.ReadAsync(_appPresent, _stop.Token);
+                var data = await _desktopActivity.EnrichAsync(local, _stop.Token);
                 await Dispatcher.InvokeAsync(() => { _activityData = PreserveActivityOnFailure(_activityData, data); UpdateActivity(); });
-                await Task.Delay(TimeSpan.FromSeconds(_hidden ? 20 : 5), _stop.Token);
+                await Task.Delay(TimeSpan.FromSeconds(5), _stop.Token);
             }
             catch (OperationCanceledException) { break; }
             catch
@@ -239,6 +244,7 @@ public partial class MainWindow : Window
     {
         var a = _activityData;
         if (a == null) return;
+        HandleTaskNotices(_noticeTracker.Observe(a, DateTimeOffset.UtcNow));
         UpdateActivitySummary(a, DateTimeOffset.UtcNow);
         var desiredIds = a.Tasks.Select(t => t.Id).ToHashSet(StringComparer.Ordinal);
         for (int i = _taskRows.Count - 1; i >= 0; i--)
@@ -255,7 +261,7 @@ public partial class MainWindow : Window
             }
             else _taskRows.Insert(i, new TaskRow(task, a, DateTimeOffset.UtcNow));
         }
-        TaskStatusText.Text = $"{a.Tasks.Count} 项 · {a.ObservedAt.ToLocalTime():HH:mm:ss}" + (a.Health is SampleHealth.Stale or SampleHealth.Unavailable ? " · 已过期" : a.Message?.Contains("补齐") == true ? " · 补齐中" : "");
+        TaskStatusText.Text = $"{a.Tasks.Count} 项" + (a.LiveTaskCount > 0 ? $" · 实时 {a.LiveTaskCount}" : "") + $" · {a.ObservedAt.ToLocalTime():HH:mm:ss}" + (a.Health is SampleHealth.Stale or SampleHealth.Unavailable ? " · 已过期" : a.Message?.Contains("补齐") == true ? " · 补齐中" : "");
         TaskStatusText.ToolTip = a.Message;
     }
 
@@ -268,11 +274,11 @@ public partial class MainWindow : Window
     private static ActivityState CurrentTaskState(TaskActivity task, ActivitySnapshot snapshot, DateTimeOffset now)
     {
         if (task.State is ActivityState.Completed or ActivityState.Interrupted) return task.State;
-        return task.State == ActivityState.ExecutionEvidence && snapshot.AppPresent
+        return task.State is ActivityState.ExecutionEvidence or ActivityState.AwaitingApproval or ActivityState.AwaitingInput && snapshot.AppPresent
             && snapshot.Health is SampleHealth.Fresh or SampleHealth.Partial
             && snapshot.ObservedAt <= now && now - snapshot.ObservedAt <= TimeSpan.FromSeconds(120)
             && task.EvidenceAt is { } evidence && evidence <= now && now - evidence <= TimeSpan.FromSeconds(120)
-            ? ActivityState.ExecutionEvidence : ActivityState.Unconfirmed;
+            ? task.State : ActivityState.Unconfirmed;
     }
 
     private void UpdateActivitySummary(ActivitySnapshot a, DateTimeOffset now)
@@ -280,10 +286,11 @@ public partial class MainWindow : Window
         var active = a.Tasks.Count(t => CurrentTaskState(t, a, now) == ActivityState.ExecutionEvidence);
         var unknown = a.Tasks.Count(t => CurrentTaskState(t, a, now) == ActivityState.Unconfirmed);
         AppPresence.Text = a.AppPresent ? " / 在线" : " / 未启动";
-        StatusDot.Fill = new SolidColorBrush(a.AppPresent ? Color.FromRgb(221, 236, 99) : Color.FromRgb(118, 132, 122));
+        ApplyStatusAccent(active > 0 ? ActivityState.ExecutionEvidence : ActivityState.Unconfirmed);
         ActiveNumber.Text = a.Health is SampleHealth.Unavailable or SampleHealth.Stale ? "—" : active.ToString("00");
         ActivityLabel.Text = a.Health == SampleHealth.Unavailable ? "状态不可用" : a.Health == SampleHealth.Stale ? "状态待确认" : active > 0 ? "执行迹象" : unknown > 0 ? "状态待确认" : "暂无执行迹象";
         ActivityHint.Text = a.Health is SampleHealth.Unavailable or SampleHealth.Stale ? "记录暂不可用" : a.Message?.Contains("补齐") == true ? "记录补齐中 · 推断" : unknown > 0 ? $"{unknown} 项待确认 · 推断" : "本地推断";
+        UpdateAttentionSummary(a, now, active);
     }
 
     private void UpdateTaskDurations()
@@ -475,10 +482,12 @@ public partial class MainWindow : Window
         _exiting = true; _clock.Stop(); _stop.Cancel();
         SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.DisplaySettingsChanged -= DisplaysChanged;
         if (_uiCheckDirectory == null) { if (Details.Visibility != Visibility.Visible) WindowPlacementService.Remember(this, _settings); SaveSettings(); }
+        _taskToast?.Close(); _taskToast = null;
         _tray?.Dispose(); _trayIcon?.Dispose();
         try { await Task.WhenAll(_loops).WaitAsync(TimeSpan.FromSeconds(15)); } catch { }
         try { _hardware.Dispose(); } catch { }
         try { _activity.Dispose(); } catch { }
+        try { await _desktopActivity.DisposeAsync(); } catch { }
         try { await _quota.DisposeAsync(); } catch { }
         try { if (_diagnostics != null) await _diagnostics.DisposeAsync(); } catch { }
         finally { _stop.Dispose(); System.Windows.Application.Current.Shutdown(); }
@@ -616,8 +625,10 @@ public partial class MainWindow : Window
             tasksWithTurnTokens = _activityData?.Tasks.Count(t => t.TokenUsage.CurrentTurn.Counts?.TotalTokens.HasValue == true),
             tasksWithThreadTokens = _activityData?.Tasks.Count(t => t.TokenUsage.Thread.Counts?.TotalTokens.HasValue == true),
             accountIdentityAvailable = _quotaData?.AccountKey != null,
+            desktopStatus = _activityData?.LiveHealth.ToString(), desktopTaskCount = _activityData?.LiveTaskCount,
             usageLedger = _usageData?.Health.ToString(), usageTokens = _usageData?.Counts.TotalTokens,
             usageThreads = _usageData?.ObservedThreads, estimateState = CurrentEstimate().State.ToString() });
+        RunTaskStatusUiChecks(results, directory);
         File.WriteAllText(Path.Combine(directory, "ui-check.json"), JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
         await StopAndExit();
     }
@@ -728,8 +739,10 @@ public partial class MainWindow : Window
         {
             ActivityState.Completed => "已完成", ActivityState.Interrupted => "已中断",
             ActivityState.ExecutionEvidence => "执行迹象",
+            ActivityState.AwaitingApproval => "等待审批", ActivityState.AwaitingInput => "等待输入",
             _ => "待确认"
         };
+        public Brush StatusBrush => StateBrush(CurrentTaskState(task, snapshot, _now));
         public string Detail => task.EvidenceAt.HasValue ? $"最近记录  {task.EvidenceAt.Value.ToLocalTime():MM-dd HH:mm:ss}" : "最近记录  —";
         public string DurationText { get; private set; } = TimingText(task, snapshot, now);
         public string TokenSummary => $"TOKEN   本轮 {TokenTotal(task.TokenUsage?.CurrentTurn)}    累计 {TokenTotal(task.TokenUsage?.Thread)}";
@@ -778,7 +791,11 @@ public partial class MainWindow : Window
             var previousStatus = StatusText;
             var previousStale = (IsTokenStale(task.TokenUsage?.CurrentTurn), IsTokenStale(task.TokenUsage?.Thread));
             _now = time;
-            if (previousStatus != StatusText) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusText)));
+            if (previousStatus != StatusText)
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusText)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusBrush)));
+            }
             if (previousStale != (IsTokenStale(task.TokenUsage?.CurrentTurn), IsTokenStale(task.TokenUsage?.Thread)))
             {
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TokenSummary)));

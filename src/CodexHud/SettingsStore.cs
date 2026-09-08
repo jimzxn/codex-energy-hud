@@ -13,6 +13,9 @@ public sealed class HudSettings
     public double PanelOpacity { get; set; } = .94;
     public bool AlwaysOnTop { get; set; } = true;
     public bool PositionLocked { get; set; }
+    public bool AttentionNotifications { get; set; } = true;
+    public bool CompletionNotifications { get; set; }
+    public bool NotificationSound { get; set; }
     public HardwareScope HardwareScope { get; set; }
     public string? SelectedQuotaKey { get; set; }
     public string? CodexHome { get; set; }

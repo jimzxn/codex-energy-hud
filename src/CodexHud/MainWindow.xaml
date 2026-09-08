@@ -5,12 +5,12 @@
   <Border x:Name="Backdrop" Background="#F0141A17" BorderBrush="#56644A" BorderThickness="1"/>
   <StackPanel>
    <Grid Height="110" MouseLeftButtonDown="DragHud">
-    <Rectangle Height="2" Width="54" Fill="{StaticResource Accent}" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="18,0,0,0"/>
-    <Path Data="M 0,0 L 12,0 0,12 Z" Fill="{StaticResource Accent}" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+    <Rectangle x:Name="ActivityTopLine" Height="2" Width="54" Fill="{StaticResource Accent}" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="18,0,0,0"/>
+    <Path x:Name="ActivityCorner" Data="M 0,0 L 12,0 0,12 Z" Fill="{StaticResource Accent}" HorizontalAlignment="Left" VerticalAlignment="Top"/>
     <TextBlock Text="01 / LOCAL TELEMETRY" FontFamily="Bahnschrift" FontSize="7" Foreground="#61705F" Margin="20,0,0,6" HorizontalAlignment="Left" VerticalAlignment="Bottom" IsHitTestVisible="False"/>
     <Grid Margin="18,10,12,12">
      <Grid.ColumnDefinitions><ColumnDefinition Width="137"/><ColumnDefinition Width="1"/><ColumnDefinition Width="123"/><ColumnDefinition Width="1"/><ColumnDefinition Width="175"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-     <Button Grid.Column="0" Padding="0,0,8,0" Click="ShowTasks" HorizontalContentAlignment="Stretch" ToolTip="展开任务明细；再次点击收起（状态为本地推断）">
+     <Button x:Name="ActivityButton" Grid.Column="0" Padding="0,0,8,0" Click="ShowTasks" HorizontalContentAlignment="Stretch" ToolTip="展开任务明细；再次点击收起">
       <StackPanel VerticalAlignment="Center">
        <StackPanel Orientation="Horizontal"><Rectangle x:Name="StatusDot" Width="5" Height="5" Fill="{StaticResource Accent}" Margin="0,0,6,0"/><TextBlock Text="CODEX" FontFamily="Bahnschrift" FontSize="11" FontWeight="SemiBold"/><TextBlock x:Name="AppPresence" Text=" / 连接中" FontSize="9" Foreground="{StaticResource TextMuted}"/></StackPanel>
        <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><TextBlock x:Name="ActiveNumber" Text="—" FontFamily="Bahnschrift" FontSize="27" LineHeight="30"/><StackPanel Margin="8,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="ActivityLabel" Text="读取任务" FontSize="11"/><TextBlock x:Name="ActivityHint" Text="本地推断" FontSize="8" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/></StackPanel></StackPanel>
@@ -52,8 +52,8 @@
       <ListBox x:Name="TaskList" Height="238" Margin="0,8,0,0" ScrollViewer.CanContentScroll="False">
        <ListBox.ItemTemplate>
         <DataTemplate>
-         <StackPanel>
-          <DockPanel><TextBlock Text="{Binding StatusText}" Foreground="#DDEC63" FontSize="10" DockPanel.Dock="Right" Margin="8,0,0,0"/><TextBlock Text="{Binding Title}" ToolTip="{Binding Title}" FontSize="11" TextTrimming="CharacterEllipsis"/></DockPanel>
+         <Border BorderBrush="{Binding StatusBrush}" BorderThickness="2,0,0,0" Padding="7,2,0,2"><StackPanel>
+          <DockPanel><TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="10" DockPanel.Dock="Right" Margin="8,0,0,0"/><TextBlock Text="{Binding Title}" ToolTip="{Binding Title}" FontSize="11" TextTrimming="CharacterEllipsis"/></DockPanel>
           <Grid Margin="0,5,0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="{Binding DurationText}" ToolTip="本轮墙钟时长，包含工具与等待；证据过期后停在最后记录。" FontSize="10" FontFamily="Bahnschrift" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding Detail}" ToolTip="{Binding Source}" FontSize="9" Foreground="{StaticResource TextMuted}" TextTrimming="CharacterEllipsis"/></Grid>
           <Border Background="#161F19" BorderBrush="#344231" BorderThickness="1,0,0,0" Padding="6,4" Margin="0,0,0,3" ToolTip="{Binding TokenHint}" ToolTipService.ShowDuration="30000">
            <StackPanel>
@@ -61,7 +61,7 @@
             <TextBlock Text="{Binding TokenBreakdown}" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
            </StackPanel>
           </Border>
-         </StackPanel>
+         </StackPanel></Border>
         </DataTemplate>
        </ListBox.ItemTemplate>
       </ListBox>
@@ -84,6 +84,9 @@
       <CheckBox x:Name="TopmostCheck" Content="始终置顶" Checked="ChangeOptions" Unchecked="ChangeOptions"/>
       <CheckBox x:Name="LockCheck" Content="锁定位置" ToolTip="禁止拖动；按钮仍可操作。" Checked="ChangeOptions" Unchecked="ChangeOptions"/>
       <CheckBox x:Name="StartupCheck" Content="登录 Windows 后自动启动" Checked="ChangeStartup" Unchecked="ChangeStartup"/>
+      <CheckBox x:Name="AttentionNotifyCheck" Content="审批 / 输入等待桌面提醒" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
+      <CheckBox x:Name="CompletionNotifyCheck" Content="完成 / 中断桌面提醒" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
+      <CheckBox x:Name="NotificationSoundCheck" Content="提醒声音" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
       <DockPanel Margin="0,12,0,0"><TextBlock x:Name="ScaleLabel" Text="缩放 100%" Width="110" FontSize="11"/><Slider x:Name="ScaleSlider" Minimum="0.8" Maximum="2" TickFrequency="0.1" IsSnapToTickEnabled="True" ValueChanged="ChangeAppearance"/></DockPanel>
       <DockPanel Margin="0,13,0,0"><TextBlock x:Name="OpacityLabel" Text="不透明度 94%" Width="110" FontSize="11"/><Slider x:Name="OpacitySlider" Minimum="0.45" Maximum="1" ValueChanged="ChangeAppearance"/></DockPanel>
       <DockPanel Margin="0,12,0,0"><Button Content="更改目录" DockPanel.Dock="Right" Click="ChooseCodexDirectory" FontSize="10"/><StackPanel><TextBlock Text="Codex 数据目录" FontSize="10" Foreground="{StaticResource TextMuted}"/><TextBlock x:Name="CodexDirectoryText" FontSize="10" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/></StackPanel></DockPanel>

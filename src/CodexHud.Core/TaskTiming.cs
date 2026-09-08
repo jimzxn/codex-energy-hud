@@ -23,7 +23,7 @@ public static class TaskTiming
         if (task.EvidenceAt is not { } evidence || evidence < start || evidence > now
             || snapshot.ObservedAt < start || snapshot.ObservedAt > now) return Missing();
 
-        bool advances = task.State == ActivityState.ExecutionEvidence && snapshot.AppPresent
+        bool advances = task.State is ActivityState.ExecutionEvidence or ActivityState.AwaitingApproval or ActivityState.AwaitingInput && snapshot.AppPresent
             && snapshot.Health is SampleHealth.Fresh or SampleHealth.Partial
             && now - snapshot.ObservedAt <= EvidenceLifetime && now - evidence <= EvidenceLifetime;
         if (advances) return Display("本轮已用", now - start, true);
