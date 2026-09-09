@@ -158,17 +158,22 @@ public static class QuotaEstimateTests
                 Require(estimate.State == EstimateState.Variable && estimate.Segments == 4);
             }
         });
-        Check("resets, balance increases, and duration changes are isolated", () =>
+        Check("metadata changes and refills are reviewed before history is archived", () =>
         {
-            foreach (var mode in new[] { "reset", "increase", "duration" })
+            foreach (var mode in new[] { "metadata", "increase", "duration" })
             {
                 var estimator = Trained();
                 var window = Window(mode == "increase" ? 99 : 92);
-                if (mode == "reset") window = window with { ResetsAt = Start.AddHours(6) };
+                if (mode == "metadata") window = window with { ResetsAt = Start.AddHours(6) };
                 if (mode == "duration") window = window with { WindowMinutes = 600, Key = "codex/primary/600" };
                 estimator.Observe(new(Start.AddMinutes(4), [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(4, 4000));
-                var estimate = estimator.Get(window, Start.AddMinutes(4));
-                Require(estimate.State == EstimateState.Calibrating && estimate.Segments == 0);
+                var held = estimator.Get(window, Start.AddMinutes(4));
+                Require(held.State == EstimateState.Calibrating && held.Segments == (mode == "duration" ? 0 : 3));
+                if (mode == "duration") continue;
+                estimator.Observe(new(Start.AddMinutes(5), [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(5, 4000));
+                var confirmed = estimator.Get(window, Start.AddMinutes(5));
+                Require(confirmed.Segments == (mode == "increase" ? 0 : 4));
+                Require(confirmed.RemainingTokens is null);
             }
         });
         Check("periods keep separate histories from the same sampled tokens", () =>
@@ -273,9 +278,99 @@ public static class QuotaEstimateTests
             restartedAgain.Observe(Snapshot(6, 94), Usage(6, 0) with { Epoch = "restart-2", ModelMix = null });
             restartedAgain.Observe(Snapshot(7, 94), Usage(7, 0) with { Epoch = "restart-2" });
             var confirming = restartedAgain.Get(Window(94), Start.AddMinutes(7));
-            Require(confirming.State == EstimateState.Calibrating && confirming.Segments == 3);
+            Require(confirming.State == EstimateState.Estimated && confirming.Segments == 3 && confirming.RecoveryRequired == 0);
             restartedAgain.Observe(Snapshot(8, 92), Usage(8, 1000) with { Epoch = "restart-2" });
             Near(restartedAgain.Get(Window(92), Start.AddMinutes(8)).RemainingTokens, 46000);
+        }));
+        Check("saved history is visible before the first quota sample without consuming its checkpoint", () => WithStorage(path =>
+        {
+            var original = new QuotaTokenEstimator(path);
+            for (var i = 0; i <= 3; i++) original.Observe(Snapshot(i, 100 - 2 * i), CheckpointUsage(i, i * 1000));
+            original.Observe(Snapshot(4, 93), CheckpointUsage(4, 3500));
+            var saved = File.ReadAllText(path);
+            var restarted = new QuotaTokenEstimator(path);
+            var checkpoint = restarted.RestoredLedgerCheckpoint;
+            for (var i = 0; i < 3; i++)
+            {
+                var preview = restarted.GetSavedHistory(Window(93).Key, Start.AddMinutes(5));
+                Require(preview.State == EstimateState.Incomplete && preview.Segments == 3 && preview.ObservedDrop == 6);
+                Require(preview.From == Start && preview.Through == Start.AddMinutes(4) && preview.PendingDrop == 1);
+                Require(preview.RemainingTokens is null && preview.LowerTokens is null && preview.UpperTokens is null);
+                Require(preview.RecoverySamples == 0 && preview.RecoveryRequired == 2 && preview.ProgressReason!.Contains("已保存历史"));
+                Require(restarted.Get(Window(93), Start.AddMinutes(5)).Segments == 3);
+                Require(ReferenceEquals(checkpoint, restarted.RestoredLedgerCheckpoint) && File.ReadAllText(path) == saved);
+            }
+            restarted.Observe(Snapshot(5, 93), CheckpointUsage(5, 3500));
+            Require(restarted.Get(Window(93), Start.AddMinutes(5)).RecoverySamples == 1);
+            restarted.Observe(Snapshot(6, 93), CheckpointUsage(6, 3500));
+            var restored = restarted.Get(Window(93), Start.AddMinutes(6));
+            Require(restored.State == EstimateState.Estimated && restored.Segments == 3 && restored.PendingDrop == 1);
+            Near(restored.RemainingTokens, 46500);
+        }));
+        Check("quota startup failures and missing identity retain a visible saved history", () => WithStorage(path =>
+        {
+            foreach (var health in new[] { SampleHealth.Unavailable, SampleHealth.Loading, SampleHealth.Stale, SampleHealth.Fresh })
+            {
+                Trained(path);
+                var restarted = new QuotaTokenEstimator(path);
+                restarted.Observe(Snapshot(4, 94, health, account: null), Usage(4, 0));
+                var saved = File.ReadAllText(path);
+                var preview = restarted.GetSavedHistory(Window(94).Key, Start.AddMinutes(4));
+                Require(preview.Segments == 3 && preview.ObservedDrop == 6 && preview.RemainingTokens is null);
+                Require(preview.State == (health == SampleHealth.Fresh ? EstimateState.Incomplete : EstimateState.Stale));
+                Require(restarted.Get(Window(94), Start.AddMinutes(4)).Segments == 3 && File.ReadAllText(path) == saved);
+            }
+        }));
+        Check("older quota snapshots leave newer saved history visible but unconfirmed", () => WithStorage(path =>
+        {
+            Trained(path);
+            var restarted = new QuotaTokenEstimator(path);
+            restarted.Observe(Snapshot(2, 96), Usage(2, 2000));
+            var preview = restarted.Get(Window(96), Start.AddMinutes(4));
+            Require(preview.State == EstimateState.Stale && preview.Segments == 3 && preview.ObservedDrop == 6);
+            Require(preview.RemainingTokens is null && preview.Through == Start.AddMinutes(3));
+        }));
+        Check("saved preview does not expose a known different account or an unselected key", () => WithStorage(path =>
+        {
+            Trained(path);
+            var restarted = new QuotaTokenEstimator(path);
+            Require(restarted.GetSavedHistory(null, Start.AddMinutes(4)).Segments == 0);
+            Require(restarted.GetSavedHistory("codex/secondary/10080", Start.AddMinutes(4)).Segments == 0);
+            restarted.Observe(new(Start.AddMinutes(4), [], SampleHealth.Fresh) { AccountKey = "other" }, Usage(4, 0));
+            Require(restarted.GetSavedHistory(Window(94).Key, Start.AddMinutes(4)).Segments == 0);
+            Require(restarted.Get(Window(94), Start.AddMinutes(4)).Segments == 0);
+        }));
+        Check("activated history remains visible when its live quota window disappears", () => WithStorage(path =>
+        {
+            Trained(path);
+            var restarted = new QuotaTokenEstimator(path);
+            restarted.Observe(Snapshot(4, 94), Usage(4, 0) with { Epoch = "restart" });
+            restarted.Observe(Snapshot(5, 94), Usage(5, 0) with { Epoch = "restart" });
+            Require(restarted.Get(Window(94), Start.AddMinutes(5)).State == EstimateState.Estimated);
+            restarted.Observe(new(Start.AddMinutes(6), [], SampleHealth.Fresh) { AccountKey = "account-A" },
+                Usage(6, 0) with { Epoch = "restart" });
+            var saved = File.ReadAllText(path);
+            var preview = restarted.GetSavedHistory(Window(94).Key, Start.AddMinutes(6));
+            Require(preview.Segments == 3 && preview.ObservedDrop == 6 && preview.RemainingTokens is null);
+            Require(preview.State == EstimateState.Incomplete && preview.ProgressReason!.Contains("已保留历史"));
+            Require(preview.From == Start && preview.Through == Start.AddMinutes(5));
+            Require(preview.RecoverySamples == 0 && preview.RecoveryRequired == 2);
+            Require(restarted.GetSavedHistory(Window(94).Key, Start.AddHours(25)).Segments == 0);
+            Require(restarted.GetSavedHistory(Window(94).Key, Start.AddMinutes(6)).Segments == 3);
+            Require(File.ReadAllText(path) == saved);
+        }));
+        Check("saved preview excludes expired and future segments without changing the retained record", () => WithStorage(path =>
+        {
+            var original = Trained(path);
+            Observe(original, 4, 93, 3500);
+            var saved = File.ReadAllText(path);
+            var restarted = new QuotaTokenEstimator(path);
+            var expired = restarted.GetSavedHistory(Window(94).Key, Start.AddHours(25));
+            Require(expired.Segments == 0 && expired.ObservedDrop == 0 && expired.PendingDrop == 0 && expired.RecoveryRequired == 0 && expired.RemainingTokens is null);
+            Require(restarted.GetSavedHistory(Window(94).Key, Start.AddHours(-1)).Segments == 0);
+            var current = restarted.GetSavedHistory(Window(94).Key, Start.AddMinutes(4));
+            Require(current.Segments == 3 && current.PendingDrop == 1);
+            Require(File.ReadAllText(path) == saved);
         }));
         Check("bad, oversized, and null persistence safely start fresh", () => WithStorage(path =>
         {
@@ -337,7 +432,7 @@ public static class QuotaEstimateTests
             var closed = estimator.Get(Window(98), Start.AddMinutes(2));
             Require(closed.Segments == 1 && closed.ObservedDrop == 2 && closed.PendingDrop == 0);
         });
-        Check("pause ignores replays and confirms only a new complete segment", () =>
+        Check("short same-epoch pauses retain progress and recover after two healthy reads", () =>
         {
             var estimator = Trained();
             estimator.Observe(Snapshot(4, 92), Usage(4, 4000) with { Health = SampleHealth.Partial });
@@ -345,14 +440,13 @@ public static class QuotaEstimateTests
             var replay = estimator.Get(Window(94), Start.AddMinutes(3));
             Require(replay.State == EstimateState.Incomplete && replay.Segments == 3 && replay.RemainingTokens is null);
             Observe(estimator, 5, 90, 5000);
-            Require(estimator.Get(Window(90), Start.AddMinutes(5)).RemainingTokens is null);
-            Observe(estimator, 6, 89, 5500);
-            Require(estimator.Get(Window(89), Start.AddMinutes(6)).PendingDrop == 1);
-            Require(estimator.Get(Window(89), Start.AddMinutes(6)).RemainingTokens is null);
-            Observe(estimator, 7, 88, 6000);
-            var confirmed = estimator.Get(Window(88), Start.AddMinutes(7));
-            Require(confirmed.State == EstimateState.Estimated && confirmed.Segments == 4 && confirmed.ObservedDrop == 8);
-            Near(confirmed.RemainingTokens, 44000);
+            var first = estimator.Get(Window(90), Start.AddMinutes(5));
+            Require(first.RemainingTokens is null && first.RecoverySamples == 1 && first.Segments == 4 && first.ObservedDrop == 10);
+            Observe(estimator, 6, 90, 5000);
+            var confirmed = estimator.Get(Window(90), Start.AddMinutes(6));
+            Require(confirmed.State == EstimateState.Estimated && confirmed.RecoveryRequired == 0);
+            Require(confirmed.Segments == 4 && confirmed.ObservedDrop == 10);
+            Near(confirmed.RemainingTokens, 45000);
         });
         Check("an older higher balance cannot erase closed history during a pause", () =>
         {
@@ -360,7 +454,7 @@ public static class QuotaEstimateTests
             estimator.Invalidate("暂停");
             Observe(estimator, 2, 96, 2000);
             var held = estimator.Get(Window(94), Start.AddMinutes(3));
-            Require(held.State == EstimateState.Stale && held.Segments == 3 && held.RemainingTokens is null);
+            Require(held.State == EstimateState.Incomplete && held.Segments == 3 && held.RemainingTokens is null && held.RecoveryRequired == 2 && held.LastResetReason == "暂停");
         });
         Check("idle profile expiry and mixed workloads do not erase progress", () =>
         {
@@ -400,32 +494,40 @@ public static class QuotaEstimateTests
             estimator.Observe(Snapshot(6,92), Usage(6,1000) with { Epoch = "new-5" });
             Require(estimator.Get(Window(92), Start.AddMinutes(6)).Segments == 4);
         }));
-        Check("same-period quota rebound after restart rejects the old samples", () => WithStorage(path =>
+        Check("same-period refill after restart needs a second reading before archiving", () => WithStorage(path =>
         {
             Trained(path);
             var estimator = new QuotaTokenEstimator(path);
-            estimator.Observe(Snapshot(4,99), Usage(4,0) with { Epoch = "new" });
-            var result = estimator.Get(Window(99), Start.AddMinutes(4));
+            estimator.Observe(Snapshot(4, 99), Usage(4, 0) with { Epoch = "new" });
+            var review = estimator.Get(Window(99), Start.AddMinutes(4));
+            Require(review.Segments == 3 && review.RemainingTokens is null);
+            estimator.Observe(Snapshot(5, 99), Usage(5, 0) with { Epoch = "new" });
+            var result = estimator.Get(Window(99), Start.AddMinutes(5));
             Require(result.Segments == 0 && result.RemainingTokens is null);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            Require(saved.RootElement.GetProperty("Archives")[0].GetProperty("Segments").GetArrayLength() == 3);
         }));
-        Check("period reset and rebound clear persisted history even while ledger is incomplete", () => WithStorage(path =>
+        Check("quota-only review preserves history and confirms boundaries despite an incomplete ledger", () => WithStorage(path =>
         {
-            foreach (string mode in new[] { "deadline", "identity", "rebound" })
+            foreach (string mode in new[] { "deadline", "metadata", "refill" })
             {
+                if (File.Exists(path)) File.Delete(path); // Each mode starts an independent timeline.
                 var estimator = Trained(path);
-                var window = Window(mode == "rebound" ? 99 : 92);
                 var time = mode == "deadline" ? Start.AddHours(5) : Start.AddMinutes(4);
-                if (mode == "identity") window = window with { ResetsAt = Start.AddHours(6) };
-                estimator.Observe(new(time, [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(4,4000) with { ObservedAt = time, Health = SampleHealth.Partial });
-                estimator = new QuotaTokenEstimator(path);
-                estimator.Observe(new(time.AddMinutes(1), [window], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(5,0) with { ObservedAt = time.AddMinutes(1) });
-                Require(estimator.Get(window, time.AddMinutes(1)).Segments == 0);
+                var window = Window(mode == "refill" ? 99 : 92) with { ResetsAt = mode == "refill" ? Start.AddHours(5) : Start.AddHours(6) };
+                for (int i = 0; i < 2; i++)
+                    estimator.Observe(new(time.AddMinutes(i), [window], SampleHealth.Fresh) { AccountKey = "account-A" },
+                        Usage(4 + i, 4000) with { ObservedAt = time.AddMinutes(i), Health = SampleHealth.Partial });
+                using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+                var active = saved.RootElement.GetProperty("Windows")[0].GetProperty("Segments").GetArrayLength();
+                Require(active == (mode == "metadata" ? 3 : 0));
+                if (mode != "metadata") Require(saved.RootElement.GetProperty("Archives").GetArrayLength() > 0);
             }
         }));
         Check("old accounting format cannot seed the corrected collection scope", () => WithStorage(path =>
         {
             Trained(path);
-            File.WriteAllText(path, File.ReadAllText(path).Replace("\"Version\":2", "\"Version\":1"));
+            File.WriteAllText(path, File.ReadAllText(path).Replace("\"Version\":3", "\"Version\":1"));
             var estimator = new QuotaTokenEstimator(path);
             Observe(estimator, 4, 94, 0);
             Require(estimator.Get(Window(94), Start.AddMinutes(4)).Segments == 0);
@@ -480,6 +582,231 @@ public static class QuotaEstimateTests
             Observe(estimator,5,92,1000);
             Near(estimator.Get(Window(92), Start.AddMinutes(5)).RemainingTokens,46000);
         }));
+        Check("mature history recovers while idle without spending another two points", () => WithStorage(path =>
+        {
+            Trained(path);
+            var estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(4, 94), Usage(4, 0) with { Epoch = "idle-restart" });
+            var first = estimator.Get(Window(94), Start.AddMinutes(4));
+            Require(first.Segments == 3 && first.ObservedDrop == 6 && first.RecoverySamples == 1 && first.RecoveryRequired == 2);
+            estimator.Observe(Snapshot(4, 94), Usage(4, 0) with { Epoch = "idle-restart" });
+            Require(estimator.Get(Window(94), Start.AddMinutes(4)).RecoverySamples == 1);
+            estimator.Observe(Snapshot(5, 94), Usage(5, 0) with { Epoch = "idle-restart" });
+            var ready = estimator.Get(Window(94), Start.AddMinutes(5));
+            Require(ready.State == EstimateState.Estimated && ready.Segments == 3 && ready.RecoveryRequired == 0);
+            Near(ready.RemainingTokens, 47000);
+        }));
+        Check("unmatched quota interrupts consecutive recovery evidence", () =>
+        {
+            var estimator = Trained();
+            estimator.Invalidate("恢复连续性测试");
+            Observe(estimator, 4, 94, 3000);
+            Require(estimator.Get(Window(94), Start.AddMinutes(4)).RecoverySamples == 1);
+            Observe(estimator, 5, 93, 3000);
+            var unmatched = estimator.Get(Window(93), Start.AddMinutes(5));
+            Require(unmatched.State == EstimateState.Incomplete && unmatched.RecoverySamples == 0 && unmatched.PendingDrop == 1);
+            Observe(estimator, 6, 93, 3500);
+            Require(estimator.Get(Window(93), Start.AddMinutes(6)).RecoverySamples == 1);
+            Require(estimator.Get(Window(93), Start.AddMinutes(6)).RemainingTokens is null);
+            Observe(estimator, 7, 93, 3500);
+            Near(estimator.Get(Window(93), Start.AddMinutes(7)).RemainingTokens, 46500);
+        });
+        Check("a short pause preserves one point and same-epoch continuity closes it", () =>
+        {
+            var estimator = new QuotaTokenEstimator();
+            Observe(estimator, 0, 100, 0); Observe(estimator, 1, 99, 500);
+            estimator.Observe(Snapshot(2, 98), Usage(2, 1000) with { Health = SampleHealth.Partial });
+            var paused = estimator.Get(Window(98), Start.AddMinutes(2));
+            Require(paused.PendingDrop == 1 && paused.Segments == 0 && paused.State == EstimateState.Incomplete);
+            Observe(estimator, 3, 98, 1000);
+            var closed = estimator.Get(Window(98), Start.AddMinutes(3));
+            Require(closed.Segments == 1 && closed.ObservedDrop == 2);
+        });
+        Check("a changed epoch isolates both prior progress and newly unpaired decline", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            Observe(estimator, 4, 93, 3500);
+            estimator.Observe(Snapshot(5, 92), Usage(5, 0) with { Epoch = "rebuilt-ledger" });
+            var held = estimator.Get(Window(92), Start.AddMinutes(5));
+            Require(held.Segments == 3 && held.ObservedDrop == 6 && held.PendingDrop == 0);
+            var diagnostic = held.Diagnostics.Last(e => e.Kind == "fragment-isolated");
+            Require(diagnostic.PreviousRemaining == 93 && diagnostic.Remaining == 92);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var isolated = saved.RootElement.GetProperty("Windows")[0].GetProperty("Isolated");
+            var last = isolated[isolated.GetArrayLength() - 1];
+            Require(last.GetProperty("Drop").GetDouble() == 2);
+            Require(last.GetProperty("PreviousPendingDrop").GetDouble() == 1);
+            Require(last.GetProperty("AdditionalUnpairedDrop").GetDouble() == 1);
+        }));
+        Check("even a zero-pending epoch gap records its missing percentage point", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            estimator.Observe(Snapshot(4, 93), Usage(4, 0) with { Epoch = "new-ledger" });
+            var diagnostic = estimator.Get(Window(93), Start.AddMinutes(4)).Diagnostics.Last(e => e.Kind == "fragment-isolated");
+            Require(diagnostic.PreviousRemaining == 94 && diagnostic.Remaining == 93);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            Require(saved.RootElement.GetProperty("Windows")[0].GetProperty("Isolated")[0].GetProperty("Drop").GetDouble() == 1);
+        }));
+        Check("small reset timestamp drift preserves progress and the original boundary", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            var first = Window(93) with { ResetsAt = Start.AddHours(5).AddSeconds(1) };
+            estimator.Observe(new(Start.AddMinutes(4), [first], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(4, 3500));
+            Require(estimator.Get(first, Start.AddMinutes(4)).PendingDrop == 1);
+            var second = first with { RemainingPercent = 92, ResetsAt = Start.AddHours(5).AddSeconds(2) };
+            estimator.Observe(new(Start.AddMinutes(5), [second], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(5, 4000));
+            Require(estimator.Get(second, Start.AddMinutes(5)).Segments == 4);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            Require(saved.RootElement.GetProperty("Windows")[0].GetProperty("AcceptedResetAt").GetDateTimeOffset() == Start.AddHours(5));
+            Require(saved.RootElement.GetProperty("Archives").GetArrayLength() == 0);
+        }));
+        Check("stable large metadata correction recovers without moving the fixed guard", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            var corrected = Window(94) with { ResetsAt = Start.AddHours(6) };
+            for (int minute = 4; minute <= 6; minute++)
+                estimator.Observe(new(Start.AddMinutes(minute), [corrected], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(minute, 3000));
+            var estimate = estimator.Get(corrected, Start.AddMinutes(6));
+            Require(estimate.State == EstimateState.Estimated && estimate.Segments == 3);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var active = saved.RootElement.GetProperty("Windows")[0];
+            Require(active.GetProperty("AcceptedResetAt").GetDateTimeOffset() == Start.AddHours(5));
+            Require(active.GetProperty("MetadataResetAt").GetDateTimeOffset() == Start.AddHours(6));
+            Require(saved.RootElement.GetProperty("Archives").GetArrayLength() == 0);
+            // Passing the fixed guard cannot be excused by a previously corrected future date.
+            var crossedAt = Start.AddHours(5).AddMinutes(1);
+            estimator.Observe(new(crossedAt, [corrected], SampleHealth.Fresh) { AccountKey = "account-A" }, Usage(301, 3000));
+            Require(estimator.Get(corrected, crossedAt).RemainingTokens is null);
+        }));
+        Check("one cached refill response cannot destroy history or bridge its ambiguity", () => WithStorage(path =>
+        {
+            var estimator = Trained(path);
+            Observe(estimator, 4, 99, 3500);
+            Require(estimator.Get(Window(99), Start.AddMinutes(4)).Segments == 3);
+            Observe(estimator, 5, 94, 4000); Observe(estimator, 6, 94, 4000);
+            var result = estimator.Get(Window(94), Start.AddMinutes(6));
+            Require(result.State == EstimateState.Estimated && result.Segments == 3 && result.ObservedDrop == 6);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            Require(saved.RootElement.GetProperty("Archives").GetArrayLength() == 0);
+        }));
+        Check("V3 replays a proven pending anchor across restart exactly once", () => WithStorage(path =>
+        {
+            var estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(0, 100), CheckpointUsage(0, 0));
+            estimator.Observe(Snapshot(1, 99), CheckpointUsage(1, 500));
+            estimator = new QuotaTokenEstimator(path);
+            Require(estimator.RestoredLedgerCheckpoint?.Sequence == 2);
+            estimator.Observe(Snapshot(2, 98), CheckpointUsage(2, 1000));
+            var closed = estimator.Get(Window(98), Start.AddMinutes(2));
+            Require(closed.Segments == 1 && closed.ObservedDrop == 2);
+            estimator.Observe(Snapshot(2, 98), CheckpointUsage(2, 1000));
+            estimator.Observe(Snapshot(3, 98), CheckpointUsage(3, 1000));
+            Require(estimator.Get(Window(98), Start.AddMinutes(3)).Segments == 1);
+            using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            Require(saved.RootElement.GetProperty("Version").GetInt32() == 3);
+            var cp = saved.RootElement.GetProperty("LedgerCheckpoint");
+            var window = saved.RootElement.GetProperty("Windows")[0];
+            Require(cp.GetProperty("Generation").GetString() == window.GetProperty("CheckpointGeneration").GetString());
+            Require(cp.GetProperty("Sequence").GetInt64() == window.GetProperty("CheckpointSequence").GetInt64());
+        }));
+        Check("changed checkpoint generation cannot connect a restored old anchor", () => WithStorage(path =>
+        {
+            var estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(0, 100), CheckpointUsage(0, 0));
+            estimator.Observe(Snapshot(1, 99), CheckpointUsage(1, 500));
+            estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(2, 98), CheckpointUsage(2, 1000, "another-generation"));
+            var isolated = estimator.Get(Window(98), Start.AddMinutes(2));
+            Require(isolated.Segments == 0 && isolated.PendingDrop == 0);
+            estimator.Observe(Snapshot(3, 97), CheckpointUsage(3, 1500, "another-generation"));
+            Require(estimator.Get(Window(97), Start.AddMinutes(3)).PendingDrop == 1);
+            estimator.Observe(Snapshot(4, 96), CheckpointUsage(4, 2000, "another-generation"));
+            var closed = estimator.Get(Window(96), Start.AddMinutes(4));
+            Require(closed.Segments == 1 && closed.ObservedDrop == 2 && closed.From == Start.AddMinutes(2));
+        }));
+        Check("fresh snapshots without checkpoints cannot pair a new anchor with an old generation", () => WithStorage(path =>
+        {
+            var estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(0, 100), CheckpointUsage(0, 0));
+            estimator.Observe(Snapshot(1, 99), CheckpointUsage(1, 500));
+            estimator.Observe(Snapshot(2, 98), Usage(2, 1000));
+            using (var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)))
+            {
+                var window = saved.RootElement.GetProperty("Windows")[0];
+                Require(window.GetProperty("Segments").GetArrayLength() == 1);
+                Require(window.GetProperty("Anchor").ValueKind == System.Text.Json.JsonValueKind.Null);
+                Require(window.GetProperty("CheckpointGeneration").ValueKind == System.Text.Json.JsonValueKind.Null);
+            }
+            estimator = new QuotaTokenEstimator(path);
+            estimator.Observe(Snapshot(3, 96), CheckpointUsage(3, 2000));
+            Require(estimator.Get(Window(96), Start.AddMinutes(3)).Segments == 1);
+            Require(estimator.Get(Window(96), Start.AddMinutes(3)).PendingDrop == 0);
+        }));
+        Check("a mismatched checkpoint is rejected without losing the pending point", () =>
+        {
+            var estimator = new QuotaTokenEstimator();
+            estimator.Observe(Snapshot(0, 100), CheckpointUsage(0, 0));
+            estimator.Observe(Snapshot(1, 99), CheckpointUsage(1, 500));
+            var mismatched = Usage(2, 1000) with { Checkpoint = CheckpointUsage(1, 500).Checkpoint };
+            estimator.Observe(Snapshot(2, 98), mismatched);
+            var held = estimator.Get(Window(98), Start.AddMinutes(2));
+            Require(held.State == EstimateState.Incomplete && held.PendingDrop == 1 && held.Segments == 0);
+            estimator.Observe(Snapshot(3, 98), CheckpointUsage(3, 1000));
+            Require(estimator.Get(Window(98), Start.AddMinutes(3)).Segments == 1);
+        });
+        Check("corrupt checkpoint metadata preserves closed history and idle recovery", () => WithStorage(path =>
+        {
+            var estimator = new QuotaTokenEstimator(path);
+            for (int i = 0; i <= 3; i++) estimator.Observe(Snapshot(i, 100 - 2 * i), CheckpointUsage(i, 1000 * i));
+            estimator.Observe(Snapshot(4, 93), CheckpointUsage(4, 3500));
+            var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+            json["LedgerCheckpoint"]!["Checksum"] = new string('0', 64);
+            File.WriteAllText(path, json.ToJsonString());
+            estimator = new QuotaTokenEstimator(path);
+            Require(estimator.RestoredLedgerCheckpoint is null);
+            estimator.Observe(Snapshot(5, 93), CheckpointUsage(5, 0, "restarted", "fresh-epoch"));
+            var held = estimator.Get(Window(93), Start.AddMinutes(5));
+            Require(held.Segments == 3 && held.PendingDrop == 0);
+            Require(held.Diagnostics.Any(e => e.Kind == "fragment-isolated" && e.Reason.Contains("检查点")));
+            estimator.Observe(Snapshot(6, 93), CheckpointUsage(6, 0, "restarted", "fresh-epoch"));
+            Near(estimator.Get(Window(93), Start.AddMinutes(6)).RemainingTokens, 46500);
+        }));
+        Check("V2 closed segments migrate without inventing an old anchor", () => WithStorage(path =>
+        {
+            Trained(path);
+            var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+            json["Version"] = 2;
+            json.AsObject().Remove("LedgerCheckpoint");
+            var window = json["Windows"]![0]!.AsObject();
+            foreach (string property in new[] { "IdentityHash", "AcceptedResetAt", "MetadataResetAt", "Anchor", "LastCounts", "EpochHash",
+                "CheckpointGeneration", "CheckpointSequence", "CycleId", "Diagnostics", "Isolated", "Candidate" }) window.Remove(property);
+            File.WriteAllText(path, json.ToJsonString());
+            var estimator = new QuotaTokenEstimator(path);
+            Observe(estimator, 4, 94, 0); Observe(estimator, 5, 94, 0);
+            var restored = estimator.Get(Window(94), Start.AddMinutes(5));
+            Require(restored.Segments == 3 && restored.RecoveryRequired == 0);
+            Require(restored.Diagnostics.Any(e => e.Kind == "history-restored" && e.Reason.Contains("旧版")));
+            Near(restored.RemainingTokens, 47000);
+        }));
+        Check("malformed version types cannot crash loading", () => WithStorage(path =>
+        {
+            foreach (var version in new[] { "\"3\"", "{}", "[]", "null", "3.5" })
+            {
+                File.WriteAllText(path, "{\"Version\":" + version + ",\"Windows\":[]}");
+                var estimator = new QuotaTokenEstimator(path);
+                Observe(estimator, 0, 100, 0);
+                Require(estimator.Get(Window(100), Start).Segments == 0);
+            }
+        }));
+        Check("expired restored history returns to initial calibration instead of recovery", () => WithStorage(path =>
+        {
+            Trained(path);
+            var estimator = new QuotaTokenEstimator(path);
+            // Get prunes a loaded history after its first valid restore.
+            Observe(estimator, 4, 94, 0);
+            var old = estimator.Get(Window(94), Start.AddHours(25));
+            Require(old.Segments == 0 && old.RecoveryRequired == 0 && old.RecoverySamples == 0);
+        }));
         return failures;
 
         void Check(string name, Action test)
@@ -499,6 +826,13 @@ public static class QuotaEstimateTests
     private static QuotaSnapshot Snapshot(int minute, double remaining, SampleHealth health = SampleHealth.Fresh, string? account = "account-A") =>
         new(Start.AddMinutes(minute), [Window(remaining)], health) { AccountKey = account };
     private static UsageLedgerSnapshot Usage(int minute, long total) => new(Start.AddMinutes(minute), "epoch-A", Counts(total), SampleHealth.Fresh, 2, "model-A/default");
+    private static UsageLedgerSnapshot CheckpointUsage(int minute, long total, string generation = "fixture-generation", string epoch = "epoch-A")
+    {
+        var snapshot = Usage(minute, total) with { Epoch = epoch };
+        var checkpoint = new UsageLedgerCheckpoint(epoch, snapshot.Counts, snapshot.ObservedAt, generation, minute + 1)
+        { HomeHash = new string('A', 64), SchemaHash = new string('B', 64), Started = Start }.Seal();
+        return snapshot with { Checkpoint = checkpoint };
+    }
     private static TokenCounts Counts(long total)
     {
         var output = total / 5;
@@ -507,9 +841,9 @@ public static class QuotaEstimateTests
     }
     private static void Observe(QuotaTokenEstimator estimator, int minute, double remaining, long total) => estimator.Observe(Snapshot(minute, remaining), Usage(minute, total));
     private static void Near(double? value, double expected) => Require(value is not null && Math.Abs(value.Value - expected) <= Math.Max(.000001, Math.Abs(expected) * 1e-10));
-    private static void Require(bool condition)
+    private static void Require(bool condition, [System.Runtime.CompilerServices.CallerArgumentExpression("condition")] string? expression = null)
     {
-        if (!condition) throw new InvalidOperationException("Assertion failed.");
+        if (!condition) throw new InvalidOperationException("Assertion failed: " + expression);
     }
     private static void WithStorage(Action<string> action)
     {

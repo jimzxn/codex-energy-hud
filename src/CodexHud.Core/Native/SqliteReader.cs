@@ -5,7 +5,20 @@ namespace CodexHud.Core.Native;
 /// <summary>Small read-only SQLite adapter; opens the original WAL-aware database without copying it.</summary>
 internal sealed class SqliteReader : IDisposable
 {
+    private const string NativeLibraryName = "codexhud-sqlite";
     private IntPtr _database;
+    private static readonly Lazy<IntPtr> SqliteLibrary = new(() =>
+        NativeLibrary.Load(OperatingSystem.IsWindows() ? "winsqlite3.dll"
+            : OperatingSystem.IsMacOS() ? "/usr/lib/libsqlite3.dylib"
+            : throw new DllNotFoundException("SQLite is not configured for this operating system.")));
+
+    static SqliteReader()
+    {
+        // One resolver for this assembly, scoped to SQLite. Other platform imports use .NET's
+        // normal loader. The system library handle intentionally lives for the process lifetime.
+        NativeLibrary.SetDllImportResolver(typeof(SqliteReader).Assembly,
+            (name, _, _) => name == NativeLibraryName ? SqliteLibrary.Value : IntPtr.Zero);
+    }
     private const int Row = 100;
     private const int Done = 101;
 
@@ -70,32 +83,32 @@ internal sealed class SqliteReader : IDisposable
         _database = IntPtr.Zero;
     }
 
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_open_v2([MarshalAs(UnmanagedType.LPUTF8Str)] string path,
         out IntPtr database, int flags, [MarshalAs(UnmanagedType.LPUTF8Str)] string? vfs);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_close_v2(IntPtr database);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_busy_timeout(IntPtr database, int milliseconds);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_prepare_v2(IntPtr database,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, int bytes, out IntPtr statement, IntPtr tail);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_stmt_readonly(IntPtr statement);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_bind_text(IntPtr statement, int index,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string value, int bytes, IntPtr destructor);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_step(IntPtr statement);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_finalize(IntPtr statement);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_column_count(IntPtr statement);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr sqlite3_column_name(IntPtr statement, int index);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_column_type(IntPtr statement, int index);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr sqlite3_column_text(IntPtr statement, int index);
 }
 

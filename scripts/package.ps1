@@ -9,6 +9,10 @@ Copy-Item -LiteralPath (Join-Path $widgetRoot 'README.md') -Destination (Join-Pa
 $widgetReleaseDocs = Join-Path $widgetRelease 'docs'
 New-Item -ItemType Directory -Path $widgetReleaseDocs -Force | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $widgetRoot 'docs') -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $widgetReleaseDocs $_.Name) -Force }
+# Keep the README illustration available in offline packages.
+$widgetReadmeAssets = Join-Path $widgetReleaseDocs 'assets'
+New-Item -ItemType Directory -Path $widgetReadmeAssets -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $widgetRoot 'docs\assets\readme-hero.svg') -Destination (Join-Path $widgetReadmeAssets 'readme-hero.svg') -Force
 $widgetEvidence = @('ui-final-verified\ui-check.json','home-persistence.json','lifecycle\soak-result.json','hardware.json','hardware-initial-attempt.json','unit-tests.txt','soak-release\launch.json','soak-release\soak-result.json','soak-release\resources.jsonl','soak-initial-build\launch.json','soak-initial-build\soak-result.json')
 $widgetEvidence += @('v1.1.0\build-tests.txt','v1.1.0\disk-live.json','v1.1.0\disk-tests.txt','v1.1.0\ui\ui-check.json','v1.1.0\ui-user\ui-check.json','v1.1.0\smoke\launch.json','v1.1.0\smoke\soak-result.json','v1.1.0\smoke\resources.jsonl')
 $widgetEvidence += @('v1.2.0\build-tests.txt','v1.2.0\tokens-live.json','v1.2.0\ui-first\ui-check.json','v1.2.0\ui-final\ui-check.json','v1.2.0\process-association.json','v1.2.0\process-association-host.json','v1.2.0\smoke\launch.json','v1.2.0\smoke\soak-result.json','v1.2.0\smoke\resources.jsonl','v1.2.0\smoke\verify-release.json')
@@ -16,6 +20,9 @@ $widgetEvidence += @('v1.3.0\build-first.txt','v1.3.0\build-tests.txt','v1.3.0\l
 $widgetEvidence += @('v1.4.0\build-tests.txt','v1.4.0\ui-release\ui-check.json','v1.4.0\smoke-final\launch.json','v1.4.0\smoke-final\soak-result.json','v1.4.0\smoke-final\resources.jsonl','v1.4.0\smoke-final\verify-release.json')
 $widgetEvidence += @('v1.4.1\build-tests.txt','v1.4.1\ledger-live.json','v1.4.1\ui-release\ui-check.json','v1.4.1\smoke\launch.json','v1.4.1\smoke\soak-result.json','v1.4.1\smoke\resources.jsonl','v1.4.1\smoke\verify-release.json')
 $widgetEvidence += @('v1.4.2\build-tests.txt','v1.4.2\ui-release\ui-check.json','v1.4.2\smoke\launch.json','v1.4.2\smoke\soak-result.json','v1.4.2\smoke\resources.jsonl','v1.4.2\smoke\verify-release.json')
+$widgetEvidence += @('v1.5.0\build-tests.txt','v1.5.0\mac-build.txt','v1.5.0\workload-live.json','v1.5.0\validation-summary.json','v1.5.0\source-manifest.json','v1.5.0\ui-final\ui-check.json','v1.5.0\smoke\launch.json','v1.5.0\smoke\soak-result.json','v1.5.0\smoke\resources.jsonl','v1.5.0\smoke\verify-release.json')
+$widgetEvidence += @('v1.5.1\build-tests.txt','v1.5.1\ui-final\ui-check.json','v1.5.1\smoke\launch.json','v1.5.1\smoke\soak-result.json','v1.5.1\smoke\resources.jsonl','v1.5.1\smoke\verify-release.json','v1.5.1\recovery-verification.json')
+$widgetEvidence += @('v1.5.1\mac-build.txt','v1.5.1\source-manifest.json','v1.5.1\package-source-manifest.json','v1.5.1\smoke-restart\launch.json','v1.5.1\smoke-restart\soak-result.json','v1.5.1\smoke-restart\resources.jsonl','v1.5.1\smoke-restart\verify-release.json','v1.5.1\smoke-restart\checkpoint-verification.json')
 foreach ($widgetRelative in $widgetEvidence) {
     $widgetSource = Join-Path (Join-Path $widgetArtifacts 'validation') $widgetRelative
     if (Test-Path -LiteralPath $widgetSource) {

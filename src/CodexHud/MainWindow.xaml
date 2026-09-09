@@ -1,6 +1,6 @@
 <Window x:Class="CodexHud.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:CodexHud.Controls"
  Title="Codex 电量 HUD" SizeToContent="WidthAndHeight" WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" Topmost="True" UseLayoutRounding="True" SnapsToDevicePixels="True">
- <Grid x:Name="Shell" Width="560" HorizontalAlignment="Left" VerticalAlignment="Top">
+ <Grid x:Name="Shell" Width="654" HorizontalAlignment="Left" VerticalAlignment="Top">
   <Grid.LayoutTransform><ScaleTransform x:Name="UiScale" ScaleX="1" ScaleY="1"/></Grid.LayoutTransform>
   <Border x:Name="Backdrop" Background="#F0141A17" BorderBrush="#56644A" BorderThickness="1"/>
   <StackPanel>
@@ -9,7 +9,7 @@
     <Path x:Name="ActivityCorner" Data="M 0,0 L 12,0 0,12 Z" Fill="{StaticResource Accent}" HorizontalAlignment="Left" VerticalAlignment="Top"/>
     <TextBlock Text="01 / LOCAL TELEMETRY" FontFamily="Bahnschrift" FontSize="7" Foreground="#61705F" Margin="20,0,0,6" HorizontalAlignment="Left" VerticalAlignment="Bottom" IsHitTestVisible="False"/>
     <Grid Margin="18,10,12,12">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="137"/><ColumnDefinition Width="1"/><ColumnDefinition Width="123"/><ColumnDefinition Width="1"/><ColumnDefinition Width="175"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="137"/><ColumnDefinition Width="1"/><ColumnDefinition Width="123"/><ColumnDefinition Width="1"/><ColumnDefinition Width="175"/><ColumnDefinition Width="94"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <Button x:Name="ActivityButton" Grid.Column="0" Padding="0,0,8,0" Click="ShowTasks" HorizontalContentAlignment="Stretch" ToolTip="展开任务明细；再次点击收起">
       <StackPanel VerticalAlignment="Center">
        <StackPanel Orientation="Horizontal"><Rectangle x:Name="StatusDot" Width="5" Height="5" Fill="{StaticResource Accent}" Margin="0,0,6,0"/><TextBlock Text="CODEX" FontFamily="Bahnschrift" FontSize="11" FontWeight="SemiBold"/><TextBlock x:Name="AppPresence" Text=" / 连接中" FontSize="9" Foreground="{StaticResource TextMuted}"/></StackPanel>
@@ -28,23 +28,37 @@
      <Button Grid.Column="4" Padding="13,0,6,0" Click="ShowQuotas" HorizontalContentAlignment="Stretch" ToolTip="选择额度池和周期">
       <StackPanel VerticalAlignment="Center"><TextBlock Text="ENERGY RESERVE" FontSize="8" FontFamily="Bahnschrift" Foreground="{StaticResource TextMuted}"/><TextBlock x:Name="QuotaTitle" Text="正在读取额度" FontSize="12" FontWeight="SemiBold" Margin="0,6,0,0" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="QuotaPeriod" Visibility="Collapsed"/><TextBlock x:Name="EstimateText" Text="Token · 校准中" FontSize="10" Foreground="#CCD5A5" Margin="0,4,0,0" TextTrimming="CharacterEllipsis" ToolTipService.ShowDuration="30000"/><TextBlock x:Name="ResetText" Text="等待账户响应" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
      </Button>
-     <Button Grid.Column="5" Padding="0" Click="ShowQuotas" HorizontalContentAlignment="Center" ToolTip="剩余额度；点击手动选择" AutomationProperties.Name="选择 Codex 额度">
+     <Button x:Name="UsageButton" Grid.Column="5" Padding="7,0" Click="ShowUsage" HorizontalContentAlignment="Center" AutomationProperties.Name="查看实时 Token 用量" ToolTipService.ShowDuration="30000">
+      <Grid Width="80" Height="80">
+       <TextBlock Text="TOKEN / 1s" FontFamily="Bahnschrift" FontSize="8" Foreground="{StaticResource TextMuted}"/>
+       <TextBlock x:Name="UsageTotalValue" Text="—" FontFamily="Bahnschrift" FontSize="16" Foreground="{StaticResource Accent}" Margin="0,13,0,0" VerticalAlignment="Top"/>
+       <local:UsageSparkline x:Name="OverallUsageChart" Height="40" VerticalAlignment="Bottom"/>
+      </Grid>
+     </Button>
+     <Button Grid.Column="6" Padding="0" Click="ShowQuotas" HorizontalContentAlignment="Center" ToolTip="剩余额度；点击手动选择" AutomationProperties.Name="选择 Codex 额度">
       <local:QuotaRing x:Name="Ring" Width="80" Height="80"/>
      </Button>
     </Grid>
    </Grid>
    <Border BorderBrush="#394536" BorderThickness="0,1,0,0" Height="24" Background="#33111A12" MouseLeftButtonDown="DragHud">
     <Grid Margin="18,0,18,0" VerticalAlignment="Center">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="137"/><ColumnDefinition Width="180"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="105"/><ColumnDefinition Width="106"/><ColumnDefinition Width="1"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <TextBlock Text="DISK / 整机" FontFamily="Bahnschrift" FontSize="9" Foreground="{StaticResource TextMuted}" ToolTip="本机物理磁盘读写合计；不随 CPU/GPU 范围切换"/>
-     <StackPanel Grid.Column="1" Orientation="Horizontal"><TextBlock Text="读 ↓" FontSize="9" Foreground="#AFBD76" Margin="0,0,10,0"/><TextBlock x:Name="DiskReadValue" Text="—" FontSize="10" FontFamily="Bahnschrift"/></StackPanel>
-     <StackPanel Grid.Column="2" Orientation="Horizontal"><TextBlock Text="写 ↑" FontSize="9" Foreground="#AFBD76" Margin="0,0,10,0"/><TextBlock x:Name="DiskWriteValue" Text="—" FontSize="10" FontFamily="Bahnschrift"/></StackPanel>
+     <StackPanel Grid.Column="1" Orientation="Horizontal"><TextBlock Text="读 ↓" FontSize="9" Foreground="#AFBD76" Margin="0,0,5,0"/><TextBlock x:Name="DiskReadValue" Text="—" FontSize="10" FontFamily="Bahnschrift"/></StackPanel>
+     <StackPanel Grid.Column="2" Orientation="Horizontal"><TextBlock Text="写 ↑" FontSize="9" Foreground="#AFBD76" Margin="0,0,5,0"/><TextBlock x:Name="DiskWriteValue" Text="—" FontSize="10" FontFamily="Bahnschrift"/></StackPanel>
+     <Rectangle Grid.Column="3" Fill="#394536" Height="12"/>
+     <Grid x:Name="UsageFooter" Grid.Column="4" Margin="10,0,0,0" ToolTipService.ShowDuration="30000">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="91"/><ColumnDefinition Width="126"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal"><TextBlock Text="输入 " FontSize="9" Foreground="#53B8FF"/><TextBlock x:Name="UsageInputValue" Text="—" FontFamily="Bahnschrift" FontSize="10"/></StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal"><TextBlock Text="Cache hit " FontSize="9" Foreground="#78DB88"/><TextBlock x:Name="UsageCacheValue" Text="—" FontFamily="Bahnschrift" FontSize="10"/></StackPanel>
+      <StackPanel Grid.Column="2" Orientation="Horizontal"><TextBlock Text="输出 " FontSize="9" Foreground="#DDEC63"/><TextBlock x:Name="UsageOutputValue" Text="—" FontFamily="Bahnschrift" FontSize="10"/></StackPanel>
+     </Grid>
     </Grid>
    </Border>
    <Border x:Name="Details" Visibility="Collapsed" BorderBrush="#394536" BorderThickness="0,1,0,0" Padding="16,10,16,14">
     <ScrollViewer x:Name="DetailsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel>
-     <DockPanel Margin="0,0,0,10"><Button DockPanel.Dock="Right" Content="收起 ↑" Click="CollapseDetails" FontSize="10" Foreground="{StaticResource TextMuted}"/><StackPanel Orientation="Horizontal"><Button Content="任务与硬件" Click="ShowTasks" FontSize="11"/><Button Content="额度" Click="ShowQuotas" FontSize="11" Margin="4,0"/><Button Content="设置" Click="ShowSettings" FontSize="11"/></StackPanel></DockPanel>
+     <DockPanel Margin="0,0,0,10"><Button DockPanel.Dock="Right" Content="收起 ↑" Click="CollapseDetails" FontSize="10" Foreground="{StaticResource TextMuted}"/><StackPanel Orientation="Horizontal"><Button Content="任务与硬件" Click="ShowTasks" FontSize="11"/><Button Content="用量" Click="ShowUsage" FontSize="11" Margin="4,0"/><Button Content="本周期" Click="ShowBilling" FontSize="11" Margin="4,0"/><Button Content="额度" Click="ShowQuotas" FontSize="11" Margin="4,0"/><Button Content="设置" Click="ShowSettings" FontSize="11"/></StackPanel></DockPanel>
      <StackPanel x:Name="TasksPanel">
       <TextBlock x:Name="MemoryText" FontSize="10" Foreground="#CBD3BE" TextWrapping="Wrap"/>
       <TextBlock x:Name="GpuDetail" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,5,0,9" TextWrapping="Wrap"/>
@@ -61,11 +75,45 @@
             <TextBlock Text="{Binding TokenBreakdown}" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
            </StackPanel>
           </Border>
+          <TextBlock Text="{Binding CostText}" Visibility="{Binding CostVisibility}" ToolTip="{Binding CostHint}" ToolTipService.ShowDuration="30000" FontFamily="Bahnschrift, Microsoft YaHei UI" FontSize="10" Foreground="#CCD5A5" Margin="0,1,0,4" TextTrimming="CharacterEllipsis"/>
          </StackPanel></Border>
         </DataTemplate>
        </ListBox.ItemTemplate>
       </ListBox>
       <TextBlock x:Name="TaskStatusText" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,7,0,0" TextTrimming="CharacterEllipsis"/>
+     </StackPanel>
+     <StackPanel x:Name="UsagePanel" Visibility="Collapsed">
+      <DockPanel><TextBlock x:Name="UsageScaleText" DockPanel.Dock="Right" FontFamily="Bahnschrift" FontSize="9" Foreground="{StaticResource TextMuted}"/><TextBlock Text="实时用量 · 最近 60 秒" FontSize="11"/></DockPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><TextBlock Text="━ 输入" Foreground="#53B8FF" FontSize="10"/><TextBlock Text="┄ Cache hit" Foreground="#78DB88" FontSize="10" Margin="16,0"/><TextBlock Text="━ 输出" Foreground="#DDEC63" FontSize="10"/></StackPanel>
+      <TextBlock Text="每秒新观测的 Token · 缓存命中包含在输入中" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,5,0,8"/>
+      <ListBox x:Name="UsageTaskList" Height="300" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+       <ListBox.ItemTemplate><DataTemplate>
+        <StackPanel Margin="2,3" ToolTip="{Binding Hint}" ToolTipService.ShowDuration="30000">
+         <DockPanel><TextBlock Text="{Binding Tags}" DockPanel.Dock="Right" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="8,0,0,0"/><TextBlock Text="{Binding Title}" FontSize="11" TextTrimming="CharacterEllipsis"/></DockPanel>
+         <Grid Margin="0,5,0,5"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+          <TextBlock Text="{Binding InputText}" FontFamily="Bahnschrift, Microsoft YaHei UI" FontSize="10" Foreground="#53B8FF"/>
+          <TextBlock Grid.Column="1" Text="{Binding CacheText}" FontFamily="Bahnschrift" FontSize="10" Foreground="#78DB88"/>
+          <TextBlock Grid.Column="2" Text="{Binding OutputText}" FontFamily="Bahnschrift, Microsoft YaHei UI" FontSize="10" Foreground="#DDEC63"/>
+         </Grid>
+         <local:UsageSparkline History="{Binding History}" Maximum="{Binding Maximum}" EndTime="{Binding EndTime}" Breakdown="True" Height="48"/>
+         <TextBlock Text="{Binding CostText}" Visibility="{Binding CostVisibility}" ToolTip="{Binding CostHint}" ToolTipService.ShowDuration="30000" FontFamily="Bahnschrift, Microsoft YaHei UI" FontSize="10" Foreground="#CCD5A5" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+       </DataTemplate></ListBox.ItemTemplate>
+      </ListBox>
+      <TextBlock x:Name="UsageEmptyText" Text="等待本机任务用量记录" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,8,0,0"/>
+      <TextBlock x:Name="UsageStatusText" FontSize="9" Foreground="{StaticResource TextMuted}" Margin="0,7,0,0" TextTrimming="CharacterEllipsis"/>
+     </StackPanel>
+     <StackPanel x:Name="BillingPanel" Visibility="Collapsed">
+      <Button x:Name="BillingSummaryCard" Click="OpenBillingReport" Background="#161F19" BorderBrush="#394536" BorderThickness="1" Padding="14" HorizontalContentAlignment="Stretch" AutomationProperties.Name="查看本周期详细报告" ToolTipService.ShowDuration="30000">
+       <StackPanel>
+        <TextBlock x:Name="BillingPeriodText" Text="等待所选额度周期" FontSize="11" Foreground="{StaticResource TextMuted}"/>
+        <Grid Margin="0,14,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <StackPanel><TextBlock Text="总 TOKEN" FontSize="10" Foreground="{StaticResource TextMuted}"/><TextBlock x:Name="BillingTokenText" Text="—" FontSize="25" Foreground="{StaticResource Accent}" Margin="0,5,0,0"/></StackPanel>
+         <StackPanel Grid.Column="1"><TextBlock Text="API 等效费用 · USD" FontSize="10" Foreground="{StaticResource TextMuted}"/><TextBlock x:Name="BillingCostText" Text="—" FontSize="22" Foreground="{StaticResource Accent}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+        </Grid>
+        <DockPanel><TextBlock Text="详细报告 ↗" DockPanel.Dock="Right" FontSize="10"/><TextBlock x:Name="BillingStatusText" Text="历史补齐中" Foreground="{StaticResource TextMuted}" FontSize="10" TextTrimming="CharacterEllipsis"/></DockPanel>
+       </StackPanel>
+      </Button>
      </StackPanel>
      <StackPanel x:Name="QuotasPanel" Visibility="Collapsed">
       <Border x:Name="EstimateCard" Background="#17231D" BorderBrush="#6A7949" BorderThickness="2,0,0,0" Padding="10,8" ToolTipService.ShowDuration="30000">
@@ -99,6 +147,7 @@
       <CheckBox x:Name="AttentionNotifyCheck" Content="审批 / 输入等待桌面提醒" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
       <CheckBox x:Name="CompletionNotifyCheck" Content="完成 / 中断桌面提醒" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
       <CheckBox x:Name="NotificationSoundCheck" Content="提醒声音" Checked="ChangeNotifications" Unchecked="ChangeNotifications"/>
+      <CheckBox x:Name="SessionCostCheck" Content="显示任务行累计费用（USD）" ToolTip="控制任务和用量面板的累计费用显示；本周期报告持续采集。API 等效估算，不代表订阅扣款。" Checked="ChangeSessionCost" Unchecked="ChangeSessionCost"/>
       <DockPanel Margin="0,12,0,0"><TextBlock x:Name="ScaleLabel" Text="缩放 100%" Width="110" FontSize="11"/><Slider x:Name="ScaleSlider" Minimum="0.8" Maximum="2" TickFrequency="0.1" IsSnapToTickEnabled="True" ValueChanged="ChangeAppearance"/></DockPanel>
       <DockPanel Margin="0,13,0,0"><TextBlock x:Name="OpacityLabel" Text="不透明度 94%" Width="110" FontSize="11"/><Slider x:Name="OpacitySlider" Minimum="0.45" Maximum="1" ValueChanged="ChangeAppearance"/></DockPanel>
       <DockPanel Margin="0,12,0,0"><Button Content="更改目录" DockPanel.Dock="Right" Click="ChooseCodexDirectory" FontSize="10"/><StackPanel><TextBlock Text="Codex 数据目录" FontSize="10" Foreground="{StaticResource TextMuted}"/><TextBlock x:Name="CodexDirectoryText" FontSize="10" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/></StackPanel></DockPanel>

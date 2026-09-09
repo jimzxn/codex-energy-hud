@@ -53,7 +53,7 @@ public partial class MainWindow
             {
                 _settings.Scale = scale; ApplyAppearance(); OpenPanel("tasks"); UpdateLayout();
                 Capture(Path.Combine(directory, $"status-tasks-{scale * 100:0}.png"));
-                results.Add(new { scenario = $"status-tasks-scale-{scale}", passed = Math.Abs(ActualWidth - 560 * scale) < 2
+                results.Add(new { scenario = $"status-tasks-scale-{scale}", passed = Math.Abs(ActualWidth - 654 * scale) < 2
                     && ActualHeight <= WindowPlacementService.WorkingHeightDip(this, _settings)
                     && _taskRows.All(r => !string.IsNullOrWhiteSpace(r.StatusText)) });
             }

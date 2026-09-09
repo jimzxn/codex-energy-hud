@@ -9,8 +9,10 @@ public sealed record MetricSample(double? Value, DateTimeOffset? ObservedAt, Sam
 public sealed record QuotaWindow(string Key, string LimitId, string Label, string Slot, int? WindowMinutes, double? RemainingPercent, DateTimeOffset? ResetsAt);
 public sealed record ResetCreditSample(int? AvailableCount, DateTimeOffset? ObservedAt, SampleHealth Health)
 {
+    public IReadOnlyList<ResetCreditInfo> Credits { get; init; } = [];
     public static ResetCreditSample Missing { get; } = new(null, null, SampleHealth.Unavailable);
 }
+public sealed record ResetCreditInfo(string Id, DateTimeOffset? ExpiresAt, string? ResetType = null);
 public sealed record QuotaSnapshot(DateTimeOffset ObservedAt, IReadOnlyList<QuotaWindow> Windows, SampleHealth Health, string? Message = null)
 {
     public string? AccountKey { get; init; }

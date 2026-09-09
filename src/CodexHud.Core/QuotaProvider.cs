@@ -180,7 +180,20 @@ public sealed class QuotaProvider : IQuotaProvider
         if (payload.TryGetProperty("rateLimitResetCredits", out var resets) && resets.ValueKind == JsonValueKind.Object
             && resets.TryGetProperty("availableCount", out var count) && count.ValueKind == JsonValueKind.Number
             && count.TryGetInt32(out int available) && available >= 0)
-            return new(available, observedAt, SampleHealth.Fresh);
+        {
+            var details = new List<ResetCreditInfo>();
+            if (resets.TryGetProperty("credits", out var credits) && credits.ValueKind == JsonValueKind.Array)
+                foreach (var credit in credits.EnumerateArray().Take(1024))
+                {
+                    if (credit.ValueKind != JsonValueKind.Object || GetString(credit, "id") is not { } id) continue;
+                    DateTimeOffset? expiresAt = null;
+                    if (credit.TryGetProperty("expiresAt", out var expires) && expires.ValueKind == JsonValueKind.Number
+                        && expires.TryGetInt64(out var timestamp))
+                        try { expiresAt = DateTimeOffset.FromUnixTimeSeconds(timestamp); } catch (ArgumentOutOfRangeException) { }
+                    details.Add(new(id, expiresAt, GetString(credit, "resetType")));
+                }
+            return new(available, observedAt, SampleHealth.Fresh) { Credits = details.AsReadOnly() };
+        }
         return ResetCreditSample.Missing;
     }
 
@@ -272,16 +285,25 @@ public sealed class QuotaProvider : IQuotaProvider
         {
             var start = new ProcessStartInfo(executable)
             {
-                UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardInputEncoding = new UTF8Encoding(false), StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
                 WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
             };
+            if (OperatingSystem.IsWindows()) start.WindowStyle = ProcessWindowStyle.Hidden;
             start.ArgumentList.Add("app-server");
             start.ArgumentList.Add("--listen");
             start.ArgumentList.Add("stdio://");
             start.Environment["CODEX_HOME"] = codexHome;
+            if (OperatingSystem.IsMacOS())
+            {
+                // npm's codex uses /usr/bin/env node. Finder has a minimal PATH, so retain
+                // the chosen installation's bin directory and known CLI directories.
+                start.Environment["PATH"] = string.Join(Path.PathSeparator,
+                    new[] { Path.GetDirectoryName(executable)! }
+                        .Concat(CodexLocator.ExecutableSearchDirectories()).Distinct(StringComparer.Ordinal));
+            }
             var process = new Process { StartInfo = start };
             try
             {

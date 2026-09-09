@@ -49,6 +49,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         TaskList.ItemsSource = _taskRows;
+        UsageTaskList.ItemsSource = _workloadRows;
         _uiCheckDirectory = uiCheckDirectory;
         _diagnosticDirectory = diagnosticDirectory;
         _soakSeconds = soakSeconds;
@@ -63,15 +64,21 @@ public partial class MainWindow : Window
         _quota = new QuotaProvider(codexHome: codexHome);
         _hardware = new HardwareProvider(() => _quota.OwnedProcessId);
         _activity = new ActivityProvider(codexHome);
-        _usageLedger = new UsageLedgerProvider(codexHome);
+        _workload = new WorkloadUsageProvider(codexHome);
         var directoryKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(codexHome).ToUpperInvariant())))[..12];
+        _sessionCosts = new SessionCostProvider(codexHome, Path.Combine(_store.DirectoryPath, $"session-costs-{directoryKey}.json"));
+        _sessionCostEnabled = true;
+        _billingCycles = new BillingCycleTracker(Path.Combine(_store.DirectoryPath, $"billing-cycles-{directoryKey}.json"));
+        _billingWindowKey = _settings.SelectedQuotaKey;
         _tokenEstimator = new QuotaTokenEstimator(Path.Combine(_store.DirectoryPath, $"token-estimates-{directoryKey}.json"));
+        _usageLedger = new UsageLedgerProvider(codexHome, _tokenEstimator.RestoredLedgerCheckpoint);
         CodexDirectoryText.Text = codexHome;
         TopmostCheck.IsChecked = _settings.AlwaysOnTop;
         LockCheck.IsChecked = _settings.PositionLocked;
         AttentionNotifyCheck.IsChecked = _settings.AttentionNotifications;
         CompletionNotifyCheck.IsChecked = _settings.CompletionNotifications;
         NotificationSoundCheck.IsChecked = _settings.NotificationSound;
+        SessionCostCheck.IsChecked = _settings.ShowSessionCost;
         StartupCheck.IsChecked = WindowPlacementService.StartupEnabled();
         ScaleSlider.Value = _settings.Scale;
         OpacitySlider.Value = _settings.PanelOpacity;
@@ -79,10 +86,10 @@ public partial class MainWindow : Window
         ApplyAppearance();
         SetupTray();
         Loaded += LoadedWindow;
-        IsVisibleChanged += (_, _) => { _hidden = !IsVisible; if (!_hidden) Interlocked.Exchange(ref _forceQuota, 1); };
+        IsVisibleChanged += (_, _) => { _hidden = !IsVisible; if (!_hidden) { Interlocked.Exchange(ref _forceQuota, 1); UpdateWorkload(); UpdateSessionCosts(); } };
         LocationChanged += (_, _) => { if (_ready && IsLoaded && Details.Visibility != Visibility.Visible) WindowPlacementService.Remember(this, _settings); };
         DpiChanged += (_, _) => { if (_ready) { ResizeToContent(); WindowPlacementService.Restore(this, _settings); } };
-        _clock.Tick += (_, _) => { UpdateCountdown(); UpdateEstimate(); UpdateTaskDurations(); };
+        _clock.Tick += (_, _) => { UpdateCountdown(); UpdateEstimate(); UpdateTaskDurations(); if (!_hidden) { UpdateWorkload(); UpdateSessionCosts(); } };
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.DisplaySettingsChanged += DisplaysChanged;
     }
@@ -90,7 +97,7 @@ public partial class MainWindow : Window
     private async void LoadedWindow(object sender, RoutedEventArgs e)
     {
         WindowPlacementService.Restore(this, _settings);
-        _loops = [Task.Run(HardwareLoop), Task.Run(ActivityLoop), Task.Run(UsageLoop), Task.Run(QuotaLoop)];
+        _loops = [Task.Run(HardwareLoop), Task.Run(ActivityLoop), Task.Run(UsageLoop), Task.Run(QuotaLoop), Task.Run(WorkloadLoop), Task.Run(SessionCostLoop), Task.Run(BillingLoop)];
         _clock.Start();
         if (_diagnosticDirectory != null)
         {
@@ -100,7 +107,15 @@ public partial class MainWindow : Window
                 hardware = _hardwareData?.Health.ToString(), hardwareObservedAt = _hardwareData?.ObservedAt,
                 activity = _activityData?.Health.ToString(), activityObservedAt = _activityData?.ObservedAt, visible = !_hidden,
                 usageLedger = _usageData?.Health.ToString(), usageObservedAt = _usageData?.ObservedAt,
-                usageTokens = _usageData?.Counts.TotalTokens, usageThreads = _usageData?.ObservedThreads
+                usageTokens = _usageData?.Counts.TotalTokens, usageThreads = _usageData?.ObservedThreads,
+                usageDetail = _usageData?.Detail, estimate = EstimateDiagnostics(),
+                workloadHealth = _workloadData?.Health.ToString(), workloadAt = _workloadData?.ObservedAt,
+                workloadTicks = _workloadData?.OverallHistory.Count, workloadTasks = _workloadRows.Count,
+                billingHealth = _billingCurrentData?.Health.ToString(), billingObservedAt = _billingCurrentData?.ObservedAt,
+                billingStartedAt = _billingCurrentData?.Period.StartedAt, billingEndsAt = _billingCurrentData?.Period.EndsAt,
+                billingTokens = _billingCurrentData?.Totals.Counts.TotalTokens, billingMinimumUsd = _billingCurrentData?.Totals.MinimumUsd,
+                billingMaximumUsd = _billingCurrentData?.Totals.MaximumUsd, billingTaskGroups = _billingCurrentData?.Tasks.Count,
+                billingUnpricedResponses = _billingCurrentData?.Totals.UnpricedResponses, billingDetail = _billingCurrentData?.Detail
             });
             _diagnostics.Start(_soakSeconds);
         }
@@ -169,7 +184,7 @@ public partial class MainWindow : Window
             try
             {
                 var usage = await _usageLedger.ReadAsync(_stop.Token);
-                await Dispatcher.InvokeAsync(() => { _usageData = usage; UpdateEstimate(); });
+                await Dispatcher.InvokeAsync(() => { AcceptUsageSnapshot(usage); UpdateEstimate(); });
                 await Task.Delay(TimeSpan.FromSeconds(_hidden ? 15 : 5), _stop.Token);
             }
             catch (OperationCanceledException) { break; }
@@ -187,13 +202,15 @@ public partial class MainWindow : Window
         {
             try
             {
-                if (Interlocked.Exchange(ref _forceQuota, 0) == 1 || DateTimeOffset.UtcNow - lastAttempt >= TimeSpan.FromSeconds(_hidden ? 120 : 60))
+                if (Interlocked.Exchange(ref _forceQuota, 0) == 1 || DateTimeOffset.UtcNow - lastAttempt >= TimeSpan.FromSeconds(_hidden ? 120 : 60)
+                    || _billingCycles.RecheckAt is { } recheck && DateTimeOffset.UtcNow >= recheck)
                 {
                     lastAttempt = DateTimeOffset.UtcNow;
                     await _usageLedger.ReadAsync(_stop.Token);
                     var data = await _quota.ReadAsync(_stop.Token);
-                    var usage = await _usageLedger.ReadAsync(_stop.Token);
-                    await Dispatcher.InvokeAsync(() => { _usageData = usage; _tokenEstimator.Observe(data, usage); _sampledUsageEpoch = usage.Epoch; _quotaData = data; UpdateQuota(); RefreshButton.IsEnabled = true; });
+                    if (!_billingFixtureActive) { _billingCycles.Observe(data); SignalBillingRefresh(); }
+                    var usage = await _usageLedger.ReadCheckpointAsync(_stop.Token);
+                    await Dispatcher.InvokeAsync(() => { if (_billingFixtureActive) return; AcceptUsageSnapshot(usage); _tokenEstimator.Observe(data, usage); _sampledUsageEpoch = usage.Epoch; _quotaData = data; UpdateQuota(); RefreshButton.IsEnabled = true; });
                 }
                 await Task.Delay(500, _stop.Token);
             }
@@ -263,6 +280,7 @@ public partial class MainWindow : Window
         }
         TaskStatusText.Text = $"{a.Tasks.Count} 项" + (a.LiveTaskCount > 0 ? $" · 实时 {a.LiveTaskCount}" : "") + $" · {a.ObservedAt.ToLocalTime():HH:mm:ss}" + (a.Health is SampleHealth.Stale or SampleHealth.Unavailable ? " · 已过期" : a.Message?.Contains("补齐") == true ? " · 补齐中" : "");
         TaskStatusText.ToolTip = a.Message;
+        UpdateSessionCosts();
     }
 
     private static ActivitySnapshot PreserveActivityOnFailure(ActivitySnapshot? previous, ActivitySnapshot incoming) =>
@@ -312,6 +330,9 @@ public partial class MainWindow : Window
             if (initial != null) { _settings.SelectedQuotaKey = initial.Key; SaveSettings(); }
         }
         var selected = q.Windows.FirstOrDefault(w => w.Key == _settings.SelectedQuotaKey);
+        if (_billingWindowKey != _settings.SelectedQuotaKey)
+        { _billingWindowKey = _settings.SelectedQuotaKey; _billingReportPeriodId = null; _billingCurrentData = _billingReportData = null; }
+        SignalBillingRefresh();
         Ring.Value = selected?.RemainingPercent ?? double.NaN;
         Ring.IsStale = q.Health is SampleHealth.Stale or SampleHealth.Unavailable;
         QuotaTitle.Text = selected?.Label ?? (_settings.SelectedQuotaKey == null ? "尚未取得额度" : "所选额度不可用");
@@ -393,6 +414,7 @@ public partial class MainWindow : Window
         try { DragMove(); WindowPlacementService.Remember(this, _settings); SaveSettings(); } catch (InvalidOperationException) { }
     }
     private void ShowTasks(object sender, RoutedEventArgs e) => TogglePanel("tasks");
+    private void ShowUsage(object sender, RoutedEventArgs e) => TogglePanel("usage");
     private void ShowQuotas(object sender, RoutedEventArgs e) => TogglePanel("quotas");
     private void ShowSettings(object sender, RoutedEventArgs e) => TogglePanel("settings");
     private void TogglePanel(string panel)
@@ -405,6 +427,11 @@ public partial class MainWindow : Window
         _openPanel = panel;
         Details.Visibility = Visibility.Visible;
         TasksPanel.Visibility = panel == "tasks" ? Visibility.Visible : Visibility.Collapsed;
+        UsagePanel.Visibility = panel == "usage" ? Visibility.Visible : Visibility.Collapsed;
+        UpdateWorkload();
+        UpdateSessionCosts();
+        BillingPanel.Visibility = panel == "billing" ? Visibility.Visible : Visibility.Collapsed;
+        UpdateBilling();
         QuotasPanel.Visibility = panel == "quotas" ? Visibility.Visible : Visibility.Collapsed;
         SettingsPanel.Visibility = panel == "settings" ? Visibility.Visible : Visibility.Collapsed;
         UpdateTaskDurations();
@@ -484,10 +511,14 @@ public partial class MainWindow : Window
         SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.DisplaySettingsChanged -= DisplaysChanged;
         if (_uiCheckDirectory == null) { if (Details.Visibility != Visibility.Visible) WindowPlacementService.Remember(this, _settings); SaveSettings(); }
         _taskToast?.Close(); _taskToast = null;
+        _billingReportWindow?.Close(); _billingReportWindow = null;
         _tray?.Dispose(); _trayIcon?.Dispose();
         try { await Task.WhenAll(_loops).WaitAsync(TimeSpan.FromSeconds(15)); } catch { }
         try { _hardware.Dispose(); } catch { }
         try { _activity.Dispose(); } catch { }
+        try { _sessionCosts.Dispose(); } catch { }
+        _sessionCostWake.Dispose();
+        _billingWake.Dispose();
         try { await _desktopActivity.DisposeAsync(); } catch { }
         try { await _quota.DisposeAsync(); } catch { }
         try { if (_diagnostics != null) await _diagnostics.DisposeAsync(); } catch { }
@@ -503,14 +534,14 @@ public partial class MainWindow : Window
         {
             _settings.Scale = scale; Details.Visibility = Visibility.Collapsed; ApplyAppearance(); UpdateLayout();
             Capture(Path.Combine(directory, $"hud-{scale * 100:0}.png"));
-            results.Add(new { scenario = $"scale-{scale}", width = ActualWidth, height = ActualHeight, ringVisible = Ring.ActualWidth == 80, fits = Math.Abs(ActualWidth - 560 * scale) < 2 && Math.Abs(ActualHeight - 134 * scale) < 2 });
+            results.Add(new { scenario = $"scale-{scale}", width = ActualWidth, height = ActualHeight, ringVisible = Ring.ActualWidth == 80, fits = Math.Abs(ActualWidth - 654 * scale) < 2 && Math.Abs(ActualHeight - 134 * scale) < 2 });
         }
         _settings.Scale = 1; ApplyAppearance();
         foreach (var scope in Enum.GetValues<HardwareScope>())
         {
             _settings.HardwareScope = scope; UpdateHardware(); UpdateLayout(); Capture(Path.Combine(directory, $"scope-{scope}.png"));
         }
-        foreach (var panel in new[] { "tasks", "quotas", "settings" })
+        foreach (var panel in new[] { "tasks", "usage", "billing", "quotas", "settings" })
         {
             OpenPanel(panel); UpdateLayout(); Capture(Path.Combine(directory, $"panel-{panel}.png"));
         }
@@ -575,7 +606,7 @@ public partial class MainWindow : Window
             Capture(Path.Combine(directory, $"tasks-{scale * 100:0}.png"));
             results.Add(new { scenario = $"expanded-tasks-scale-{scale}", width = ActualWidth, height = ActualHeight,
                 availableHeight = WindowPlacementService.WorkingHeightDip(this, _settings), scrollableHeight = DetailsScroll.ScrollableHeight,
-                passed = TaskList.ActualWidth >= 460 && DiskReadValue.ActualWidth > 0 && Math.Abs(ActualWidth - 560 * scale) < 2
+                passed = TaskList.ActualWidth >= 460 && DiskReadValue.ActualWidth > 0 && Math.Abs(ActualWidth - 654 * scale) < 2
                     && ActualHeight <= WindowPlacementService.WorkingHeightDip(this, _settings) });
         }
         _settings.Scale = 1; ApplyAppearance();
@@ -583,6 +614,11 @@ public partial class MainWindow : Window
         RunExtendedUiChecks(results, directory);
         RunEstimateUiChecks(results, directory);
         RunResetCreditUiChecks(results, directory);
+        RunWorkloadUiChecks(results, directory);
+        RunSessionCostUiChecks(results, directory);
+        await RunBillingUiChecks(results, directory);
+        RunWorkloadPlacementChecks(results);
+        await RunWorkloadVisibilityCheck(results);
         results.Add(new { scenario = "disk-rate-format", passed = ByteRate(new MetricSample(0, checkNow)) == "0 B/s"
             && ByteRate(new MetricSample(1048576, checkNow)) == "1.00 MiB/s"
             && ByteRate(MetricSample.Missing()) == "—" && ByteRate(new MetricSample(1024, checkNow, SampleHealth.Stale)).EndsWith("·") });
@@ -615,7 +651,7 @@ public partial class MainWindow : Window
             var dpi = VisualTreeHelper.GetDpi(this);
             Capture(Path.Combine(directory, $"monitor-{monitorIndex}.png"));
             results.Add(new { scenario = $"monitor-{monitorIndex++}", dpiX = dpi.PixelsPerInchX, dpiY = dpi.PixelsPerInchY,
-                width = ActualWidth, height = ActualHeight, passed = Math.Abs(ActualWidth - 560) < 2 && Math.Abs(ActualHeight - 134) < 2 });
+                width = ActualWidth, height = ActualHeight, passed = Math.Abs(ActualWidth - 654) < 2 && Math.Abs(ActualHeight - 134) < 2 });
         }
         _settings.X = _settings.Y = 999999;
         WindowPlacementService.Restore(this, _settings); WindowPlacementService.Remember(this, _settings);
@@ -637,7 +673,7 @@ public partial class MainWindow : Window
 
     private void RunExtendedUiChecks(List<object> results, string directory)
     {
-        foreach (var panel in new[] { "tasks", "quotas", "settings" })
+        foreach (var panel in new[] { "tasks", "usage", "quotas", "settings" })
         {
             OpenPanel(panel); TogglePanel(panel);
             bool collapsed = Details.Visibility == Visibility.Collapsed;
@@ -734,6 +770,18 @@ public partial class MainWindow : Window
     private sealed class TaskRow(TaskActivity task, ActivitySnapshot snapshot, DateTimeOffset now) : INotifyPropertyChanged
     {
         private DateTimeOffset _now = now;
+        private CostPresentation _cost = CostPresentation.Hidden;
+        public string CostText => _cost.Text;
+        public string CostHint => _cost.Hint;
+        public Visibility CostVisibility => _cost.Visibility;
+        public void UpdateCost(CostPresentation value)
+        {
+            if (_cost == value) return;
+            _cost = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CostText)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CostHint)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CostVisibility)));
+        }
         public string Id => task.Id;
         public string Title => task.Title;
         public string Source => task.Source;

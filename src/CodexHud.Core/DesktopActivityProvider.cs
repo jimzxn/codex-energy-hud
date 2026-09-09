@@ -35,6 +35,15 @@ public sealed class DesktopActivityProvider : IAsyncDisposable
     public async Task<ActivitySnapshot> EnrichAsync(ActivitySnapshot local, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        // The named-pipe endpoint below is a Windows desktop protocol. macOS requires its
+        // own evidenced socket transport; do not let .NET map this guessed name to a Unix pipe.
+        if (!OperatingSystem.IsWindows())
+            return local with
+            {
+                LiveTaskCount = 0,
+                LiveHealth = SampleHealth.Unavailable,
+                Message = $"macOS 桌面实时通道尚未接入；{local.Message}"
+            };
         var now = DateTimeOffset.UtcNow;
         List<object> messages = [];
         lock (_sync)

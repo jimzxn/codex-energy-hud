@@ -16,6 +16,7 @@ public sealed class HudSettings
     public bool AttentionNotifications { get; set; } = true;
     public bool CompletionNotifications { get; set; }
     public bool NotificationSound { get; set; }
+    public bool ShowSessionCost { get; set; } = true;
     public HardwareScope HardwareScope { get; set; }
     public string? SelectedQuotaKey { get; set; }
     public string? CodexHome { get; set; }

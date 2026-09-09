@@ -19,3 +19,7 @@ docs/preview*.png
 docs/validation*.md
 docs/hardware-validation.md
 docs/process-association.md
+
+# macOS filesystem metadata
+.DS_Store
+._*

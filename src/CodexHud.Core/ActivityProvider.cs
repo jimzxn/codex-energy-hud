@@ -1,10 +1,8 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using CodexHud.Core.Native;
-using Microsoft.Win32.SafeHandles;
 
 [assembly: InternalsVisibleTo("CodexHud.Tests")]
 
@@ -35,8 +33,7 @@ public sealed class ActivityProvider : IActivityProvider
 
     public ActivityProvider(string? codexHome = null)
     {
-        _codexHome = Path.GetFullPath(NormalizePathPrefix(codexHome ?? Environment.GetEnvironmentVariable("CODEX_HOME")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex")));
+        _codexHome = CodexLocator.ResolveHome(codexHome is null ? null : NormalizePathPrefix(codexHome));
     }
 
     public async Task<ActivitySnapshot> ReadAsync(bool appPresent, CancellationToken cancellationToken = default)
@@ -243,7 +240,12 @@ public sealed class ActivityProvider : IActivityProvider
     private static bool IsTopLevelLocal(SqliteRow row)
     {
         string cwd = NormalizePathPrefix(row.Text("cwd"));
-        if (cwd.Length < 3 || !char.IsAsciiLetter(cwd[0]) || cwd[1] != ':' || (cwd[2] != '\\' && cwd[2] != '/')) return false;
+        if (OperatingSystem.IsWindows())
+        {
+            if (cwd.Length < 3 || !char.IsAsciiLetter(cwd[0]) || cwd[1] != ':' || (cwd[2] != '\\' && cwd[2] != '/')) return false;
+        }
+        else if (!Path.IsPathFullyQualified(cwd) || !cwd.StartsWith('/') || cwd.StartsWith("//", StringComparison.Ordinal))
+            return false;
         if (row.Text("thread_source") is "subagent" or "guardian_review") return false;
         string source = row.Text("source");
         if (source.StartsWith('{')) return false;
@@ -259,7 +261,7 @@ public sealed class ActivityProvider : IActivityProvider
             string path = Path.GetFullPath(value);
             string root = Path.Combine(_codexHome, "sessions") + Path.DirectorySeparatorChar;
             // This adapter never searches remote hosts or recursively scans the sessions tree.
-            return path.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            return path.StartsWith(root, LogFileIdentity.PathComparison)
                 && path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ? path : null;
         }
         catch (ArgumentException) { return null; }
@@ -305,9 +307,9 @@ internal sealed class RolloutCursor(string? threadId = null)
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
-            string identity = FileIdentity(stream.SafeFileHandle, out long writeTime);
+            string identity = LogFileIdentity.Read(stream.SafeFileHandle, out long writeTime);
             long length = stream.Length;
-            bool fileChanged = !string.Equals(path, _path, StringComparison.OrdinalIgnoreCase)
+            bool fileChanged = !string.Equals(path, _path, LogFileIdentity.PathComparison)
                 || identity != _identity || length < _offset
                 || (_anchorHash is not null && !_anchorHash.AsSpan().SequenceEqual(AnchorHash(stream, _offset)));
             if (!_initialized || fileChanged)
@@ -443,24 +445,4 @@ internal sealed class RolloutCursor(string? threadId = null)
         if (time.ValueKind == JsonValueKind.Number && time.TryGetInt64(out long timestamp)) return ActivityProvider.FromUnix(timestamp);
         return null;
     }
-
-    private static string FileIdentity(SafeFileHandle handle, out long writeTime)
-    {
-        if (!GetFileInformationByHandle(handle, out var info)) throw new IOException("Cannot determine log identity.");
-        writeTime = ((long)info.LastWriteTime.dwHighDateTime << 32) | (uint)info.LastWriteTime.dwLowDateTime;
-        return $"{info.VolumeSerialNumber}:{info.FileIndexHigh}:{info.FileIndexLow}:{info.CreationTime.dwHighDateTime}:{info.CreationTime.dwLowDateTime}";
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FileInformation
-    {
-        public uint FileAttributes;
-        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
-    }
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInformation information);
 }

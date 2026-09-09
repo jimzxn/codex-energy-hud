@@ -1,15 +1,17 @@
 using System.Globalization;
-using System.Runtime.InteropServices;
+using System.Collections.ObjectModel;
 using System.Security.Cryptography;
 using System.Text.Json;
 using CodexHud.Core.Native;
-using Microsoft.Win32.SafeHandles;
 
 namespace CodexHud.Core;
 
 /// <summary>Cumulative, locally observed response usage since Epoch. It is not an account quota.</summary>
 public sealed record UsageLedgerSnapshot(DateTimeOffset ObservedAt, string Epoch, TokenCounts Counts,
-    SampleHealth Health, int ObservedThreads, string? ModelMix, string? Detail = null);
+    SampleHealth Health, int ObservedThreads, string? ModelMix, string? Detail = null)
+{
+    public UsageLedgerCheckpoint? Checkpoint { get; init; }
+}
 
 /// <summary>
 /// Reads only bounded new JSONL ranges and numeric/identity metadata. Existing files begin at EOF;
@@ -30,22 +32,40 @@ public sealed class UsageLedgerProvider
     private TokenCounts _counts = Zero;
     private bool _initialized;
     private bool _failed;
+    private string _generation = Guid.NewGuid().ToString("N");
+    private long _sequence;
+    private string? _schemaHash;
+    private bool _restorePending;
+    private DateTimeOffset _discoveryStart;
     private readonly Dictionary<string, DateTimeOffset> _ambiguousPools = new(StringComparer.Ordinal);
     private static readonly TokenCounts Zero = new(0, 0, 0, 0, 0, 0);
 
-    public UsageLedgerProvider(string codexHome) : this(codexHome, () => DateTimeOffset.UtcNow) { }
+    public UsageLedgerProvider(string codexHome, UsageLedgerCheckpoint? checkpoint = null)
+        : this(codexHome, () => DateTimeOffset.UtcNow, checkpoint) { }
 
-    internal UsageLedgerProvider(string codexHome, Func<DateTimeOffset> clock)
+    internal UsageLedgerProvider(string codexHome, Func<DateTimeOffset> clock, UsageLedgerCheckpoint? checkpoint = null)
     {
-        _home = Path.GetFullPath(NormalizePath(codexHome));
+        _home = CodexLocator.ResolveHome(NormalizePath(codexHome));
         _clock = clock;
-        _started = clock();
+        _started = _discoveryStart = clock();
+        if (checkpoint is not null && !Restore(checkpoint)) _failed = true;
     }
 
-    public async Task<UsageLedgerSnapshot> ReadAsync(CancellationToken cancellationToken = default)
+    public Task<UsageLedgerSnapshot> ReadAsync(CancellationToken cancellationToken = default) => ReadAsync(false, cancellationToken);
+    public Task<UsageLedgerSnapshot> ReadCheckpointAsync(CancellationToken cancellationToken = default) => ReadAsync(true, cancellationToken);
+
+    private async Task<UsageLedgerSnapshot> ReadAsync(bool checkpoint, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { return await Task.Run(() => Read(cancellationToken), cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            return await Task.Run(() =>
+            {
+                var snapshot = Read(cancellationToken);
+                return checkpoint && snapshot.Health == SampleHealth.Fresh
+                    ? snapshot with { Checkpoint = Capture(snapshot) } : snapshot;
+            }, cancellationToken).ConfigureAwait(false);
+        }
         finally { _gate.Release(); }
     }
 
@@ -62,6 +82,22 @@ public sealed class UsageLedgerProvider
             var columns = state.Columns("threads");
             if (!columns.Contains("id") || !columns.Contains("rollout_path"))
                 throw new IOException("Local thread index schema unavailable.");
+            var schemaHash = UsageLedgerCheckpoint.Hash(Path.GetFileName(database) + "|" + string.Join("|", columns.Order(StringComparer.Ordinal)));
+            if (_restorePending)
+            {
+                if (columns.Contains("thread_source"))
+                    foreach (var id in _cursors.Keys.Where(id => state.Query(
+                        "SELECT id FROM threads WHERE id=?1 AND thread_source='guardian_review'", id).Count > 0).ToArray())
+                        _cursors.Remove(id);
+                if (_schemaHash != schemaHash || _cursors.Values.Any(cursor => !cursor.VerifyCheckpoint()))
+                {
+                    _cursors.Clear(); _historicalUnavailable.Clear(); _ambiguousPools.Clear();
+                    _initialized = false; _failed = true;
+                    ResetEpoch(now);
+                }
+                _restorePending = false;
+            }
+            _schemaHash = schemaHash;
             // Ordinary agents and archived tasks remain included. Explicit internal review roles
             // are outside this workload ledger; this classification says nothing about billing.
             string modelColumn = columns.Contains("model") ? "model" : "NULL AS model";
@@ -100,7 +136,7 @@ public sealed class UsageLedgerProvider
                     cursor = new UsageLedgerCursor(id);
                     _cursors.Add(id, cursor);
                     cursor.SetIndexProfile(row.Text("model"), row.Text("reasoning_effort"), row.Text("model_provider"));
-                    var baseline = cursor.Initialize(path, _started, !_initialized, ref budget);
+                    var baseline = cursor.Initialize(path, _discoveryStart, !_initialized, ref budget);
                     if (baseline == LedgerReadState.Gap) gap = true;
                     if (baseline == LedgerReadState.Incomplete) complete = false;
                 }
@@ -165,11 +201,93 @@ public sealed class UsageLedgerProvider
         }
     }
 
+    private const int MaximumCheckpointBytes = 8 * 1024 * 1024;
+
+    private string HomeHash()
+    {
+        string canonical = Path.TrimEndingDirectorySeparator(_home);
+        return UsageLedgerCheckpoint.Hash(OperatingSystem.IsWindows() ? canonical.ToUpperInvariant() : canonical);
+    }
+
+    private bool Restore(UsageLedgerCheckpoint checkpoint)
+    {
+        try
+        {
+            if (checkpoint.Version != 1 || checkpoint.Scope != UsageLedgerCheckpoint.CurrentScope
+                || checkpoint.HomeHash != HomeHash() || !UsageLedgerCheckpoint.IsHash(checkpoint.SchemaHash)
+                || !Guid.TryParseExact(checkpoint.Epoch, "N", out _) || !Guid.TryParseExact(checkpoint.Generation, "N", out _)
+                || checkpoint.Sequence <= 0 || !UsageLedgerCheckpoint.ValidCounts(checkpoint.Counts)
+                || checkpoint.Started > checkpoint.ObservedAt || checkpoint.ObservedAt > _clock().AddSeconds(5)
+                || checkpoint.Cursors is null || checkpoint.Cursors.Count > MaximumThreads
+                || checkpoint.HistoricalUnavailable is null || checkpoint.HistoricalUnavailable.Count > MaximumThreads
+                || checkpoint.Profiles is null || checkpoint.Profiles.Count > 32
+                || checkpoint.AmbiguousPools is null || checkpoint.AmbiguousPools.Count != 0
+                || JsonSerializer.SerializeToUtf8Bytes(checkpoint).Length > MaximumCheckpointBytes
+                || !checkpoint.HasValidChecksum()) return false;
+            var restored = new Dictionary<string, UsageLedgerCursor>(StringComparer.Ordinal);
+            foreach (var cursor in checkpoint.Cursors)
+            {
+                if (!UsageLedgerCursor.ValidCheckpoint(cursor, checkpoint.ObservedAt)
+                    || LocalPath(cursor.Path) is not { } path || !string.Equals(path, cursor.Path, LogFileIdentity.PathComparison)
+                    || !restored.TryAdd(cursor.ThreadId, UsageLedgerCursor.Restore(cursor))) return false;
+            }
+            foreach (var pair in checkpoint.HistoricalUnavailable)
+                if (!UsageLedgerCheckpoint.IsId(pair.Key) || pair.Value is null || pair.Value.Length > 33024
+                    || restored.ContainsKey(pair.Key)) return false;
+            foreach (var pair in checkpoint.Profiles)
+                if (pair.Key is null || pair.Key.Length is 0 or > 2048 || pair.Value > checkpoint.ObservedAt.AddSeconds(5)) return false;
+            foreach (var pair in restored) _cursors.Add(pair.Key, pair.Value);
+            foreach (var pair in checkpoint.HistoricalUnavailable) _historicalUnavailable.Add(pair.Key, pair.Value);
+            foreach (var pair in checkpoint.Profiles) _profiles.Add(pair.Key, pair.Value);
+            _counts = checkpoint.Counts; _epoch = checkpoint.Epoch;
+            _generation = checkpoint.Generation; _sequence = checkpoint.Sequence;
+            _started = checkpoint.Started; _discoveryStart = checkpoint.ObservedAt;
+            _schemaHash = checkpoint.SchemaHash;
+            _initialized = true; _restorePending = true;
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException or NotSupportedException)
+        {
+            _cursors.Clear(); _historicalUnavailable.Clear(); _profiles.Clear();
+            return false;
+        }
+    }
+
+    private UsageLedgerCheckpoint? Capture(UsageLedgerSnapshot snapshot)
+    {
+        if (_schemaHash is null || _sequence == long.MaxValue || _restorePending || _failed) return null;
+        long size = _historicalUnavailable.Sum(pair => (long)(pair.Key.Length + pair.Value.Length) * 6) + 4096;
+        if (size > MaximumCheckpointBytes) return null;
+        var cursors = new List<UsageLedgerCursorCheckpoint>(_cursors.Count);
+        foreach (var cursor in _cursors.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Value))
+        {
+            if (cursor.Capture() is not { } checkpoint) return null;
+            size += JsonSerializer.SerializeToUtf8Bytes(checkpoint).Length;
+            if (size > MaximumCheckpointBytes) return null;
+            cursors.Add(checkpoint);
+        }
+        var result = new UsageLedgerCheckpoint(snapshot.Epoch, snapshot.Counts, snapshot.ObservedAt, _generation, _sequence + 1)
+        {
+            HomeHash = HomeHash(), SchemaHash = _schemaHash, Started = _started,
+            Cursors = cursors.AsReadOnly(),
+            HistoricalUnavailable = ReadOnly(_historicalUnavailable),
+            Profiles = ReadOnly(_profiles), AmbiguousPools = ReadOnly(_ambiguousPools)
+        }.Seal();
+        if (JsonSerializer.SerializeToUtf8Bytes(result).Length > MaximumCheckpointBytes) return null;
+        _sequence++;
+        return result;
+    }
+
+    internal static IReadOnlyDictionary<string, T> ReadOnly<T>(Dictionary<string, T> source) =>
+        new ReadOnlyDictionary<string, T>(source.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
     private void ResetEpoch(DateTimeOffset now)
     {
         _epoch = Guid.NewGuid().ToString("N");
+        _generation = Guid.NewGuid().ToString("N");
+        _sequence = 0;
         _counts = Zero;
-        _started = now;
+        _started = _discoveryStart = now;
         _profiles.Clear();
     }
 
@@ -180,11 +298,13 @@ public sealed class UsageLedgerProvider
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try
         {
-            string path = Path.GetFullPath(NormalizePath(raw));
+            string normalized = NormalizePath(raw);
+            if (!Path.IsPathFullyQualified(normalized)) return null;
+            string path = Path.GetFullPath(normalized);
             foreach (string name in new[] { "sessions", "archived_sessions" })
             {
                 string root = Path.Combine(_home, name) + Path.DirectorySeparatorChar;
-                if (path.StartsWith(root, StringComparison.OrdinalIgnoreCase) && path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return path;
+                if (path.StartsWith(root, LogFileIdentity.PathComparison) && path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return path;
             }
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
@@ -237,6 +357,64 @@ internal sealed class UsageLedgerCursor(string threadId)
     private readonly HashSet<string> _responses = new(StringComparer.Ordinal);
     private readonly Queue<string> _responseOrder = new();
 
+    internal static bool ValidCheckpoint(UsageLedgerCursorCheckpoint? checkpoint, DateTimeOffset observed)
+    {
+        if (checkpoint is null || !UsageLedgerCheckpoint.IsId(checkpoint.ThreadId)
+            || checkpoint.Path is null || checkpoint.Path.Length is 0 or > 32768
+            || checkpoint.Identity is null || checkpoint.Identity.Length is 0 or > 2048
+            || checkpoint.Offset < 0 || !UsageLedgerCheckpoint.IsHash(checkpoint.Anchor)
+            || checkpoint.Cumulative is not null && !UsageLedgerCheckpoint.ValidCounts(checkpoint.Cumulative)
+            || checkpoint.LastTokenTime > observed.AddSeconds(5)
+            || checkpoint.HasUsage && (checkpoint.Cumulative is null || checkpoint.LastTokenTime is null)
+            || !ValidProfile(checkpoint.Profile) || !ValidProfile(checkpoint.IndexProfile)
+            || checkpoint.IndexProvider is null || checkpoint.IndexProvider.Length is 0 or > 256
+            || checkpoint.TurnProfiles is null || checkpoint.TurnProfiles.Count > 32
+            || checkpoint.ResponseOrder is null || checkpoint.ResponseOrder.Count > 512) return false;
+        return checkpoint.TurnProfiles.All(pair => UsageLedgerCheckpoint.IsId(pair.Key) && ValidProfile(pair.Value))
+            && checkpoint.ResponseOrder.All(UsageLedgerCheckpoint.IsId)
+            && checkpoint.ResponseOrder.Distinct(StringComparer.Ordinal).Count() == checkpoint.ResponseOrder.Count;
+    }
+
+    private static bool ValidProfile(string? value) => value is { Length: > 0 and <= 2048 } && !value.Any(char.IsControl);
+
+    internal static UsageLedgerCursor Restore(UsageLedgerCursorCheckpoint checkpoint)
+    {
+        var cursor = new UsageLedgerCursor(checkpoint.ThreadId)
+        {
+            _path = checkpoint.Path, _identity = checkpoint.Identity, _offset = checkpoint.Offset,
+            _anchor = Convert.FromHexString(checkpoint.Anchor), _initialized = true,
+            _cumulative = checkpoint.Cumulative, _lastTokenTime = checkpoint.LastTokenTime,
+            _profile = checkpoint.Profile, _indexProfile = checkpoint.IndexProfile,
+            _indexProvider = checkpoint.IndexProvider, _hasUsage = checkpoint.HasUsage
+        };
+        foreach (var pair in checkpoint.TurnProfiles) cursor._turnProfiles.Add(pair.Key, pair.Value);
+        foreach (var response in checkpoint.ResponseOrder) cursor.Remember(response);
+        return cursor;
+    }
+
+    internal bool VerifyCheckpoint()
+    {
+        try
+        {
+            if (!_initialized || _path is null || _identity is null || _anchor is null || _skipLine || _failed) return false;
+            using var stream = Open(_path);
+            return LogFileIdentity.Read(stream.SafeFileHandle, out _) == _identity && stream.Length >= _offset
+                && _anchor.AsSpan().SequenceEqual(Anchor(stream, _offset));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+            or InvalidOperationException or NotSupportedException) { return false; }
+    }
+
+    internal UsageLedgerCursorCheckpoint? Capture()
+    {
+        if (!_initialized || _path is null || _identity is null || _anchor is null || _skipLine || _failed) return null;
+        return new(threadId, _path, _identity, _offset, Convert.ToHexString(_anchor))
+        {
+            Cumulative = _cumulative, LastTokenTime = _lastTokenTime, Profile = _profile,
+            IndexProfile = _indexProfile, IndexProvider = _indexProvider, HasUsage = _hasUsage,
+            TurnProfiles = UsageLedgerProvider.ReadOnly(_turnProfiles), ResponseOrder = Array.AsReadOnly(_responseOrder.ToArray())
+        };
+    }
     public void SetIndexProfile(string model, string effort, string provider)
     {
         _indexProvider = ProfilePart(provider);
@@ -248,7 +426,7 @@ internal sealed class UsageLedgerCursor(string threadId)
         try
         {
             using var stream = Open(path);
-            _identity = Identity(stream.SafeFileHandle);
+            _identity = LogFileIdentity.Read(stream.SafeFileHandle, out _);
             _path = path;
             _offset = stream.Length;
             bool demonstrablyNew = !initialSweep && NewSession(stream, start, ref budget);
@@ -339,9 +517,9 @@ internal sealed class UsageLedgerCursor(string threadId)
                 gap = initialized != LedgerReadState.Complete || _failed;
             }
             using var stream = Open(path);
-            string identity = Identity(stream.SafeFileHandle);
+            string identity = LogFileIdentity.Read(stream.SafeFileHandle, out _);
             long length = stream.Length;
-            if (_identity != identity || !string.Equals(path, _path, StringComparison.OrdinalIgnoreCase)
+            if (_identity != identity || !string.Equals(path, _path, LogFileIdentity.PathComparison)
                 || length < _offset || _anchor is not null && !_anchor.AsSpan().SequenceEqual(Anchor(stream, _offset)))
             {
                 _initialized = false;
@@ -501,23 +679,7 @@ internal sealed class UsageLedgerCursor(string threadId)
     {
         Span<byte> data = stackalloc byte[(int)Math.Min(64, offset)];
         stream.Position = offset - data.Length;
-        return SHA256.HashData(data[..stream.Read(data)]);
+        stream.ReadExactly(data);
+        return SHA256.HashData(data);
     }
-
-    private static string Identity(SafeFileHandle handle)
-    {
-        if (!GetFileInformationByHandle(handle, out var info)) throw new IOException("Log identity unavailable.");
-        return $"{info.VolumeSerialNumber}:{info.FileIndexHigh}:{info.FileIndexLow}:{info.CreationTime.dwHighDateTime}:{info.CreationTime.dwLowDateTime}";
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FileInformation
-    {
-        public uint FileAttributes;
-        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
-        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
-    }
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation information);
 }

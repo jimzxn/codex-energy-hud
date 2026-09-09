@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="600" viewBox="0 0 1280 600" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Energy HUD — local telemetry, at a glance</title>
+  <desc id="desc">An original vector style preview inspired by the Windows widget. Deep green panels, lime accents and segmented quota ring frame task activity, CPU and GPU load, quota reserve, token activity and disk throughput. All numbers are fictional demonstration data: 1,200 input tokens plus 240 output tokens total 1,440; 900 cached input tokens are included in input. This is an illustration, not a screenshot or live telemetry.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 H 0 V 32" fill="none" stroke="#263029" stroke-width=".6"/>
+    </pattern>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#1B251D"/>
+      <stop offset="1" stop-color="#101612"/>
+    </linearGradient>
+    <linearGradient id="token-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#DDEC63" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#DDEC63" stop-opacity="0"/>
+    </linearGradient>
+    <style>
+      svg { fill: #F1F3EC; }
+      text { font-family: Bahnschrift, "Segoe UI", Arial, sans-serif; }
+      .muted { fill: #909B98; }
+      .subtle { fill: #71806F; }
+      .lime { fill: #DDEC63; }
+      .blue { fill: #53B8FF; }
+      .green { fill: #78DB88; }
+      .label { font-size: 11px; letter-spacing: 1.8px; }
+      .small { font-size: 9px; }
+      .metric { font-variant-numeric: tabular-nums; }
+    </style>
+  </defs>
+
+  <!-- README cover: self-contained vector artwork, not a product screenshot. -->
+  <path d="M 0 0 H 1280 V 576 L 1256 600 H 0 Z" fill="#101612"/>
+  <path d="M 0 0 H 1280 V 576 L 1256 600 H 0 Z" fill="url(#grid)" opacity=".35"/>
+  <path d="M 28 0 H 1280 V 576 L 1256 600 H 0 V 28 Z" fill="none" stroke="#394536"/>
+  <path d="M 0 0 H 28 L 0 28 Z" fill="#DDEC63"/>
+  <path d="M 84 0 H 192" stroke="#DDEC63" stroke-width="3"/>
+  <path d="M 1196 534 V 570 H 1160" fill="none" stroke="#56644A"/>
+
+  <!-- Editorial masthead follows the widget's restrained industrial typography. -->
+  <g transform="translate(84 0)">
+    <rect x="0" y="54" width="7" height="7" fill="#DDEC63"/>
+    <text x="20" y="63" font-size="16" font-weight="600" letter-spacing="2">CODEX <tspan class="muted">/</tspan></text>
+    <text x="122" y="62" class="label muted">LOCAL TELEMETRY</text>
+    <text x="-3" y="140" font-size="70" font-weight="600" letter-spacing="-1.8" class="lime">ENERGY HUD</text>
+    <text x="0" y="174" font-size="17" class="muted">Your coding session. At a glance.</text>
+  </g>
+  <g transform="translate(929 46)">
+    <path d="M 12 0 H 267 V 34 H 0 V 12 Z" fill="#1B251D" stroke="#56644A"/>
+    <rect x="14" y="14" width="5" height="5" fill="#DDEC63"/>
+    <text x="32" y="21" font-size="10.5" letter-spacing="1.2" class="lime">DEMO DATA / STYLE PREVIEW</text>
+    <text x="267" y="64" text-anchor="end" class="label subtle">01 / WINDOWS WIDGET</text>
+    <path d="M 174 83 H 196 L 181 98 H 159 Z M 209 83 H 231 L 216 98 H 194 Z M 244 83 H 266 L 251 98 H 229 Z" fill="#56644A" opacity=".45"/>
+  </g>
+
+  <!-- Native 654 × 134 HUD proportions; every number below is fictional. -->
+  <g transform="translate(84 216) scale(1.7)">
+    <path d="M 8 8 H 654 V 134 H 0 V 8 Z" fill="#080D09" opacity=".45" transform="translate(0 7)"/>
+    <rect width="654" height="134" fill="url(#surface)" stroke="#56644A" stroke-width="1"/>
+    <rect x="1" y="1" width="652" height="108" fill="#141A17" opacity=".86"/>
+    <path d="M 0 0 H 12 L 0 12 Z" fill="#DDEC63"/>
+    <path d="M 18 1 H 72" stroke="#DDEC63" stroke-width="2"/>
+    <path d="M 646 126 H 654 V 134" fill="none" stroke="#DDEC63" stroke-width="1"/>
+
+    <!-- Task activity. -->
+    <rect x="18" y="31" width="5" height="5" fill="#DDEC63"/>
+    <text x="29" y="37" font-size="11" font-weight="600">CODEX</text>
+    <text x="67" y="37" font-size="8.5" class="muted">/ CONNECTED</text>
+    <text x="18" y="75" font-size="32" class="metric">02</text>
+    <text x="61" y="62" font-size="10.5">ACTIVE TASKS</text>
+    <text x="61" y="75" font-size="8" class="muted">LOCAL INFERENCE</text>
+    <text x="20" y="103" font-size="7" class="subtle" letter-spacing=".55">01 / LOCAL TELEMETRY</text>
+    <path d="M 155.5 26 V 80" stroke="#394536"/>
+
+    <!-- CPU and GPU, scoped to the whole machine. -->
+    <text x="169" y="31" font-size="9" class="muted">SYSTEM</text>
+    <path d="M 210 26 L 213 29 L 216 26" fill="none" stroke="#909B98" stroke-width=".8"/>
+    <text x="169" y="49" font-size="10" class="muted">CPU</text>
+    <text x="267" y="49" text-anchor="end" font-size="13" class="metric">18%</text>
+    <path d="M 169 56 H 267 M 169 80 H 267" stroke="#283428" stroke-width="2"/>
+    <path d="M 169 56 H 187 M 169 80 H 200" stroke="#AFBD76" stroke-width="2"/>
+    <text x="169" y="73" font-size="10" class="muted">GPU</text>
+    <text x="267" y="73" text-anchor="end" font-size="13" class="metric">32%</text>
+    <path d="M 279.5 26 V 80" stroke="#394536"/>
+
+    <!-- Quota pool and reset context. -->
+    <text x="293" y="31" font-size="8" class="muted" letter-spacing=".8">ENERGY RESERVE</text>
+    <text x="293" y="50" font-size="12" font-weight="600">CODEX / 5 HOURS</text>
+    <text x="293" y="66" font-size="10" fill="#CCD5A5">Token · calibrating</text>
+    <text x="293" y="81" font-size="9" class="muted">Resets in 02h 18m</text>
+
+    <!-- Demonstration rate: input 1,200 + output 240 = total 1,440. -->
+    <text x="462" y="22" font-size="8" class="muted" letter-spacing=".5">TOKEN / 1s</text>
+    <text x="462" y="44" font-size="20" class="lime metric">1,440</text>
+    <path d="M 462 90 H 542 M 462 72 H 542 M 462 54 H 542" stroke="#283428" stroke-width=".6"/>
+    <path d="M 462 87 L 468 86 L 473 79 L 478 82 L 483 68 L 488 73 L 493 61 L 498 76 L 503 70 L 508 80 L 513 65 L 518 69 L 523 58 L 528 70 L 533 64 L 538 74 L 542 63 V 91 H 462 Z" fill="url(#token-fill)"/>
+    <path d="M 462 87 L 468 86 L 473 79 L 478 82 L 483 68 L 488 73 L 493 61 L 498 76 L 503 70 L 508 80 L 513 65 L 518 69 L 523 58 L 528 70 L 533 64 L 538 74 L 542 63" fill="none" stroke="#DDEC63" stroke-width="1.2" stroke-linejoin="round"/>
+
+    <!-- Forty segments use the same geometry as Controls/QuotaRing.cs. -->
+    <g fill="none" stroke-width="4">
+      <path d="M 596.916 16.012 A 35 35 0 0 1 600.568 16.299" stroke="#65C9C6"/>
+      <path d="M 602.378 16.586 A 35 35 0 0 1 605.941 17.441" stroke="#65C9C6"/>
+      <path d="M 607.683 18.008 A 35 35 0 0 1 611.068 19.410" stroke="#65C9C6"/>
+      <path d="M 612.701 20.241 A 35 35 0 0 1 615.824 22.156" stroke="#65C9C6"/>
+      <path d="M 617.307 23.233 A 35 35 0 0 1 620.092 25.612" stroke="#65C9C6"/>
+      <path d="M 621.388 26.908 A 35 35 0 0 1 623.767 29.693" stroke="#65C9C6"/>
+      <path d="M 624.844 31.176 A 35 35 0 0 1 626.759 34.299" stroke="#65C9C6"/>
+      <path d="M 627.590 35.932 A 35 35 0 0 1 628.992 39.317" stroke="#65C9C6"/>
+      <path d="M 629.559 41.059 A 35 35 0 0 1 630.414 44.622" stroke="#65C9C6"/>
+      <path d="M 630.701 46.432 A 35 35 0 0 1 630.988 50.084" stroke="#65C9C6"/>
+      <path d="M 630.988 51.916 A 35 35 0 0 1 630.701 55.568" stroke="#65C9C6"/>
+      <path d="M 630.414 57.378 A 35 35 0 0 1 629.559 60.941" stroke="#65C9C6"/>
+      <path d="M 628.992 62.683 A 35 35 0 0 1 627.590 66.068" stroke="#65C9C6"/>
+      <path d="M 626.759 67.701 A 35 35 0 0 1 624.844 70.824" stroke="#65C9C6"/>
+      <path d="M 623.767 72.307 A 35 35 0 0 1 621.388 75.092" stroke="#65C9C6"/>
+      <path d="M 620.092 76.388 A 35 35 0 0 1 617.307 78.767" stroke="#65C9C6"/>
+      <path d="M 615.824 79.844 A 35 35 0 0 1 612.701 81.759" stroke="#65C9C6"/>
+      <path d="M 611.068 82.590 A 35 35 0 0 1 607.683 83.992" stroke="#65C9C6"/>
+      <path d="M 605.941 84.559 A 35 35 0 0 1 602.378 85.414" stroke="#65C9C6"/>
+      <path d="M 600.568 85.701 A 35 35 0 0 1 596.916 85.988" stroke="#65C9C6"/>
+      <path d="M 595.084 85.988 A 35 35 0 0 1 591.432 85.701" stroke="#65C9C6"/>
+      <path d="M 589.622 85.414 A 35 35 0 0 1 586.059 84.559" stroke="#65C9C6"/>
+      <path d="M 584.317 83.992 A 35 35 0 0 1 580.932 82.590" stroke="#65C9C6"/>
+      <path d="M 579.299 81.759 A 35 35 0 0 1 576.176 79.844" stroke="#65C9C6"/>
+      <path d="M 574.693 78.767 A 35 35 0 0 1 571.908 76.388" stroke="#65C9C6"/>
+      <path d="M 570.612 75.092 A 35 35 0 0 1 568.233 72.307" stroke="#65C9C6"/>
+      <path d="M 567.156 70.824 A 35 35 0 0 1 565.241 67.701" stroke="#65C9C6"/>
+      <path d="M 564.410 66.068 A 35 35 0 0 1 563.008 62.683" stroke="#65C9C6"/>
+      <path d="M 562.441 60.941 A 35 35 0 0 1 561.586 57.378" stroke="#65C9C6"/>
+      <path d="M 561.299 55.568 A 35 35 0 0 1 561.012 51.916" stroke="#65C9C6"/>
+      <path d="M 561.012 50.084 A 35 35 0 0 1 561.299 46.432" stroke="#65C9C6"/>
+      <path d="M 561.586 44.622 A 35 35 0 0 1 562.441 41.059" stroke="#374238"/>
+      <path d="M 563.008 39.317 A 35 35 0 0 1 564.410 35.932" stroke="#374238"/>
+      <path d="M 565.241 34.299 A 35 35 0 0 1 567.156 31.176" stroke="#374238"/>
+      <path d="M 568.233 29.693 A 35 35 0 0 1 570.612 26.908" stroke="#374238"/>
+      <path d="M 571.908 25.612 A 35 35 0 0 1 574.693 23.233" stroke="#374238"/>
+      <path d="M 576.176 22.156 A 35 35 0 0 1 579.299 20.241" stroke="#374238"/>
+      <path d="M 580.932 19.410 A 35 35 0 0 1 584.317 18.008" stroke="#374238"/>
+      <path d="M 586.059 17.441 A 35 35 0 0 1 589.622 16.586" stroke="#374238"/>
+      <path d="M 591.432 16.299 A 35 35 0 0 1 595.084 16.012" stroke="#374238"/>
+    </g>
+    <circle cx="596" cy="51" r="28" fill="none" stroke="#AFBE94" stroke-opacity=".28" stroke-width=".65"/>
+    <text x="596" y="57" text-anchor="middle" font-size="22" fill="#65C9C6" class="metric">76%</text>
+    <text x="596" y="69" text-anchor="middle" font-size="7.5" fill="#9DA997" letter-spacing=".4">REMAIN</text>
+
+    <!-- Disk and token footer: cache hit is a subset of input. -->
+    <path d="M 0 110 H 654" stroke="#394536"/>
+    <rect x="1" y="111" width="652" height="22" fill="#111A12" opacity=".55"/>
+    <text x="18" y="125" font-size="8" class="muted">DISK / HOST</text>
+    <text x="90" y="125" font-size="8" fill="#AFBD76">R</text>
+    <text x="102" y="125" font-size="9" class="metric">1.8 MB/s</text>
+    <text x="196" y="125" font-size="8" fill="#AFBD76">W</text>
+    <text x="210" y="125" font-size="9" class="metric">0.6 MB/s</text>
+    <path d="M 301 116 V 128" stroke="#394536"/>
+    <text x="311" y="125" font-size="8.5" class="blue">INPUT</text>
+    <text x="348" y="125" font-size="9" class="metric">1,200</text>
+    <text x="402" y="125" font-size="8.5" class="green">CACHE HIT</text>
+    <text x="463" y="125" font-size="9" class="metric">900</text>
+    <text x="528" y="125" font-size="8.5" class="lime">OUTPUT</text>
+    <text x="580" y="125" font-size="9" class="metric">240</text>
+  </g>
+
+  <!-- Three reading cues, deliberately free of live account information. -->
+  <g transform="translate(84 0)">
+    <path d="M 0 487 H 1112" stroke="#394536"/>
+    <text x="0" y="515" class="label lime">01 / QUOTA</text>
+    <text x="0" y="540" font-size="14" class="muted">Remaining allowance. Reset timing.</text>
+    <path d="M 355 505 V 545" stroke="#394536"/>
+    <text x="388" y="515" class="label blue">02 / ACTIVITY</text>
+    <text x="388" y="540" font-size="14" class="muted">Local tasks. Machine load.</text>
+    <path d="M 744 505 V 545" stroke="#394536"/>
+    <text x="777" y="515" class="label green">03 / USAGE</text>
+    <text x="777" y="540" font-size="14" class="muted">Input. Cache hit. Output.</text>
+    <text x="0" y="578" font-size="9" letter-spacing="1.1" class="subtle">DESIGNED TO STAY IN VIEW</text>
+    <text x="1112" y="578" text-anchor="end" font-size="9" letter-spacing=".6" class="subtle">ILLUSTRATION / FICTIONAL VALUES</text>
+  </g>
+</svg>

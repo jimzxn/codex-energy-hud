@@ -1,0 +1,136 @@
+<Window x:Class="CodexHud.BillingReportWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="本周期 · Token 与费用报告" Width="1100" Height="720" MinWidth="820" MinHeight="500"
+ Background="#141A17" Foreground="#F1F3EC" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="12"
+ WindowStartupLocation="CenterScreen" ResizeMode="CanResize" ShowInTaskbar="True"
+ UseLayoutRounding="True" SnapsToDevicePixels="True">
+ <Window.Resources>
+  <Style x:Key="ReportField" TargetType="TextBox">
+   <Setter Property="Background" Value="#18221B"/><Setter Property="Foreground" Value="#F1F3EC"/>
+   <Setter Property="BorderBrush" Value="#536047"/><Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="Padding" Value="9,6"/><Setter Property="CaretBrush" Value="#DDEC63"/>
+   <Setter Property="SelectionBrush" Value="#637541"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+  </Style>
+  <Style TargetType="ComboBoxItem">
+   <Setter Property="Foreground" Value="#F1F3EC"/><Setter Property="Padding" Value="9,8"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
+    <Border x:Name="Item" Background="#18221B" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border>
+    <ControlTemplate.Triggers>
+     <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Item" Property="Background" Value="#30402D"/></Trigger>
+     <Trigger Property="IsSelected" Value="True"><Setter TargetName="Item" Property="Background" Value="#3C4B2C"/></Trigger>
+    </ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ReportCombo" TargetType="ComboBox">
+   <Setter Property="Background" Value="#18221B"/><Setter Property="Foreground" Value="#F1F3EC"/>
+   <Setter Property="BorderBrush" Value="#536047"/><Setter Property="Padding" Value="9,6"/>
+   <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+    <Grid>
+     <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" ClickMode="Press">
+      <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="#18221B" BorderBrush="#536047" BorderThickness="1"><TextBlock Text="▾" Foreground="#DDEC63" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,9,0"/></Border></ControlTemplate></ToggleButton.Template>
+     </ToggleButton>
+     <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" Margin="9,6,28,6" VerticalAlignment="Center" IsHitTestVisible="False" ClipToBounds="True"/>
+     <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="None">
+      <Border Background="#18221B" BorderBrush="#536047" BorderThickness="1" MinWidth="{TemplateBinding ActualWidth}" MaxHeight="320">
+       <ScrollViewer CanContentScroll="True"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
+      </Border>
+     </Popup>
+    </Grid>
+    <ControlTemplate.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger></ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ReportNumber" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+   <Setter Property="FontFamily" Value="Bahnschrift, Microsoft YaHei UI"/><Setter Property="TextAlignment" Value="Right"/>
+   <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="5,0"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+  </Style>
+ </Window.Resources>
+ <Grid x:Name="ReportRoot">
+  <Grid.LayoutTransform><ScaleTransform x:Name="ReportScale" ScaleX="1" ScaleY="1"/></Grid.LayoutTransform>
+  <Grid Margin="20,16,20,12">
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+    <RowDefinition Height="*" MinHeight="80"/><RowDefinition Height="6"/><RowDefinition Height="155" MinHeight="90"/>
+    <RowDefinition Height="Auto"/>
+   </Grid.RowDefinitions>
+   <Grid Margin="0,0,0,12">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="360"/></Grid.ColumnDefinitions>
+    <StackPanel><TextBlock Text="本周期 · 用量报告" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="LOCAL USAGE / API EQUIVALENT" FontFamily="Bahnschrift" FontSize="10" Foreground="#8E9A76" Margin="0,3,0,0"/></StackPanel>
+    <StackPanel Grid.Column="1"><TextBlock Text="统计周期" Foreground="{StaticResource TextMuted}" FontSize="10" Margin="0,0,0,4"/><ComboBox x:Name="PeriodPicker" Style="{StaticResource ReportCombo}" SelectionChanged="PeriodChanged" DisplayMemberPath="Title" AutomationProperties.Name="选择统计周期"/></StackPanel>
+   </Grid>
+   <Border Grid.Row="1" Background="#1A251C" BorderBrush="#637541" BorderThickness="2,0,0,0" Padding="14,10" Margin="0,0,0,12">
+    <Grid>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="1.05*"/><ColumnDefinition Width="1.05*"/><ColumnDefinition Width="1.5*"/></Grid.ColumnDefinitions>
+     <StackPanel><TextBlock Text="总 TOKEN" FontFamily="Bahnschrift" Foreground="#B8C590" FontSize="10"/><TextBlock x:Name="TotalValue" Text="—" FontFamily="Bahnschrift" FontSize="27" Foreground="{StaticResource Accent}" Margin="0,4,10,0" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="CoverageValue" Text="等待本地记录" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,8,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Grid.Column="1"><TextBlock Text="API 等效费用估算 / USD" Foreground="#B8C590" FontSize="10"/><TextBlock x:Name="PriceValue" Text="—" FontFamily="Bahnschrift, Microsoft YaHei UI" FontSize="27" Foreground="{StaticResource Accent}" Margin="0,4,10,0" TextTrimming="CharacterEllipsis"/><TextBlock Text="按响应记录估算 · 非订阅账单" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,8,0"/></StackPanel>
+     <StackPanel Grid.Column="2" VerticalAlignment="Center"><TextBlock x:Name="PeriodRangeValue" Text="等待周期边界" FontSize="11" TextWrapping="Wrap"/><TextBlock x:Name="StatusValue" Text="读取中" Foreground="#B8C590" FontSize="10" Margin="0,5,0,0" TextWrapping="Wrap"/><TextBlock x:Name="UpdatedValue" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,4,0,0"/></StackPanel>
+    </Grid>
+   </Border>
+   <Grid Grid.Row="2" Margin="0,0,0,8">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <Grid>
+      <TextBox x:Name="SearchBox" Style="{StaticResource ReportField}" TextChanged="FilterChanged" ToolTip="按任务名称或 ID 搜索" AutomationProperties.Name="搜索任务"/>
+      <TextBlock Text="搜索任务名称或 ID" Foreground="{StaticResource TextMuted}" Margin="10,0" VerticalAlignment="Center" IsHitTestVisible="False">
+       <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=SearchBox}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+      </TextBlock>
+     </Grid>
+     <ComboBox x:Name="SortPicker" Grid.Column="1" Margin="9,0,8,0" Style="{StaticResource ReportCombo}" SelectedIndex="0" SelectionChanged="SortChanged" AutomationProperties.Name="任务排序"><ComboBoxItem Content="费用 · 从高到低"/><ComboBoxItem Content="Token · 从多到少"/><ComboBoxItem Content="用时 · 从长到短"/><ComboBoxItem Content="任务名称 · A–Z"/></ComboBox>
+     <Button Grid.Column="2" Content="补记重置" Click="AddReset" ToolTip="补记漏掉的重置；仅调整统计记录"/>
+     <Button x:Name="CorrectStartButton" Grid.Column="3" Content="校正起点" Click="CorrectStart" IsEnabled="False" ToolTip="校正所选周期的起点；仅调整统计记录"/>
+    </Grid>
+    <Grid Grid.Row="1" Margin="9,12,23,0">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*" MinWidth="160"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="92"/><ColumnDefinition Width="110"/></Grid.ColumnDefinitions>
+     <TextBlock Text="任务 / 展开查看自身与子代理" FontSize="10" Foreground="{StaticResource TextMuted}"/>
+     <TextBlock Grid.Column="1" Text="总 Token" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="{StaticResource TextMuted}"/>
+     <TextBlock Grid.Column="2" Text="输入" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="#53B8FF"/>
+     <TextBlock Grid.Column="3" Text="缓存命中" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="#78DB88"/>
+     <TextBlock Grid.Column="4" Text="输出" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="#DDEC63"/>
+     <TextBlock Grid.Column="5" Text="累计用时" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="{StaticResource TextMuted}"/>
+     <TextBlock Grid.Column="6" Text="估算 USD" Style="{StaticResource ReportNumber}" FontSize="10" Foreground="{StaticResource TextMuted}"/>
+    </Grid>
+   </Grid>
+   <Grid Grid.Row="3">
+    <ListBox x:Name="TaskRows" SelectionChanged="TaskSelected" PreviewKeyDown="TaskKeyDown" ScrollViewer.CanContentScroll="True" ScrollViewer.VerticalScrollBarVisibility="Visible" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" VirtualizingPanel.ScrollUnit="Pixel" AutomationProperties.Name="周期任务明细">
+     <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem" BasedOn="{StaticResource HudListBoxItem}"><Setter Property="Padding" Value="8,7"/><Setter Property="Margin" Value="0"/></Style></ListBox.ItemContainerStyle>
+     <ListBox.ItemTemplate><DataTemplate>
+      <Grid MinHeight="27" ToolTip="{Binding Hint}">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*" MinWidth="160"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="88"/><ColumnDefinition Width="92"/><ColumnDefinition Width="110"/></Grid.ColumnDefinitions>
+       <Grid Margin="{Binding Indent}"><Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Button Content="{Binding ExpandGlyph}" Visibility="{Binding ExpandVisibility}" Padding="2" Click="ToggleTask" AutomationProperties.Name="{Binding ExpandLabel}"/>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center"><TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontWeight="{Binding Weight}"/><TextBlock Text="{Binding Tag}" Foreground="{StaticResource TextMuted}" FontSize="9" TextTrimming="CharacterEllipsis"/></StackPanel>
+       </Grid>
+       <TextBlock Grid.Column="1" Text="{Binding TotalText}" Style="{StaticResource ReportNumber}"/>
+       <TextBlock Grid.Column="2" Text="{Binding InputText}" Style="{StaticResource ReportNumber}" Foreground="#9BBED8"/>
+       <TextBlock Grid.Column="3" Text="{Binding CacheText}" Style="{StaticResource ReportNumber}" Foreground="#A4CDA6"/>
+       <TextBlock Grid.Column="4" Text="{Binding OutputText}" Style="{StaticResource ReportNumber}" Foreground="#CFD69A"/>
+       <TextBlock Grid.Column="5" Text="{Binding DurationText}" Style="{StaticResource ReportNumber}"/>
+       <TextBlock Grid.Column="6" Text="{Binding PriceText}" Style="{StaticResource ReportNumber}" Foreground="#DDEC63"/>
+      </Grid>
+     </DataTemplate></ListBox.ItemTemplate>
+    </ListBox>
+    <TextBlock x:Name="EmptyValue" Text="等待本地用量记录" Foreground="{StaticResource TextMuted}" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+   </Grid>
+   <GridSplitter Grid.Row="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="#394536" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"/>
+   <Border Grid.Row="5" BorderBrush="#394536" BorderThickness="1" Padding="12,9" Background="#172019">
+    <ScrollViewer x:Name="DetailScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+     <StackPanel><TextBlock x:Name="DetailTitle" Text="选择任务查看模型、轮次与计价说明" FontSize="13" FontWeight="SemiBold"/><TextBlock x:Name="DetailText" Text="父任务合计包含子代理；父子并行用时取并集。缓存命中包含在输入中。" Foreground="#BCC5B5" FontSize="11" TextWrapping="Wrap" Margin="0,7,8,0"/></StackPanel>
+    </ScrollViewer>
+   </Border>
+   <TextBlock x:Name="FooterValue" Grid.Row="6" Text="本机全部普通任务 · 周期按所选额度窗口分段 · 不代表该额度池的独占用量" Foreground="{StaticResource TextMuted}" FontSize="10" TextWrapping="Wrap" Margin="0,9,0,0"/>
+  </Grid>
+  <Grid x:Name="EditOverlay" Visibility="Collapsed" Background="#C0111713" KeyboardNavigation.TabNavigation="Cycle">
+   <Border Width="470" HorizontalAlignment="Center" VerticalAlignment="Center" Background="#1C271F" BorderBrush="#8A9959" BorderThickness="1" Padding="22">
+    <StackPanel>
+     <TextBlock x:Name="EditTitle" FontSize="19" FontWeight="SemiBold"/>
+     <TextBlock Text="仅调整本机统计周期，不会消耗重置卡或更改账户额度。请输入包含时区的时间。" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" Margin="0,10,0,13"/>
+     <TextBlock Text="年-月-日 时:分:秒 时区（例：2026-09-08 12:30:00 +09:00）" FontSize="10" Foreground="#B8C590" Margin="0,0,0,5"/>
+     <TextBox x:Name="EditTimestamp" Style="{StaticResource ReportField}" FontFamily="Bahnschrift" KeyDown="EditorKeyDown" AutomationProperties.Name="重置或周期起点时间"/>
+     <TextBlock x:Name="EditError" Foreground="#FFB18C" TextWrapping="Wrap" Margin="0,9,0,0"/>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0"><Button Content="取消" Click="CancelEdit" Margin="0,0,8,0"/><Button Content="保存统计时间" Background="#34452A" Foreground="{StaticResource Accent}" Click="SaveEdit"/></StackPanel>
+    </StackPanel>
+   </Border>
+  </Grid>
+ </Grid>
+</Window>

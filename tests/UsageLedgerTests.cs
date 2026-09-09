@@ -185,7 +185,7 @@ public static class UsageLedgerTests
             Console.Error.WriteLine("FAIL usage ledger fixture: " + ex.GetType().Name + ": " + ex.Message);
         }
         finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
-        return failures + RunClassification();
+        return failures + RunClassification() + RunCheckpointRecovery() + RunEstimatorCheckpointIntegration();
     }
 
     private static int RunClassification()
@@ -335,6 +335,273 @@ public static class UsageLedgerTests
         }
         finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         Console.WriteLine($"Usage ledger classification: {checks} checks, {failures} failure(s)");
+        return failures;
+    }
+    private static int RunCheckpointRecovery()
+    {
+        int failures = 0, checks = 0;
+        void Check(bool valid, string scenario)
+        {
+            checks++;
+            if (valid) return;
+            failures++;
+            Console.Error.WriteLine("FAIL ledger checkpoint: " + scenario);
+        }
+        string home = Path.Combine(Path.GetTempPath(), "codex-hud-ledger-checkpoint-" + Guid.NewGuid().ToString("N"));
+        string sessions = Path.Combine(home, "sessions");
+        Directory.CreateDirectory(sessions);
+        string database = Path.Combine(home, "state_5.sqlite");
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
+        try
+        {
+            Sql(database, "CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,model TEXT,reasoning_effort TEXT,model_provider TEXT,thread_source TEXT);");
+            string AddTask(string id, DateTimeOffset created)
+            {
+                string path = Path.Combine(sessions, id + ".jsonl");
+                File.WriteAllText(path, Meta(id, created) + "\n", new UTF8Encoding(false));
+                Sql(database, $"INSERT INTO threads VALUES({Q(id)},{Q(path)},'gpt-6-astra','high','openai',NULL);");
+                return path;
+            }
+            UsageLedgerSnapshot Read(UsageLedgerProvider provider) => provider.ReadCheckpointAsync().GetAwaiter().GetResult();
+            string root = AddTask("root", now.AddDays(-1));
+            var provider = new UsageLedgerProvider(home, () => now);
+            var first = Read(provider);
+            Check(first.Health == SampleHealth.Fresh && first.Checkpoint is { Sequence: 1 }
+                && first.Checkpoint.Counts == first.Counts && first.Checkpoint.ObservedAt == first.ObservedAt
+                && first.Checkpoint.HasValidChecksum(), "same-gate capture binds counts, time and integrity to the cursor baseline");
+            Check(provider.ReadAsync().GetAwaiter().GetResult().Checkpoint is null,
+                "ordinary five-second reads do not copy a checkpoint");
+            now = now.AddSeconds(1);
+            Append(root, Context("work", now), Usage("root", "work", "r1", now, 10, 10));
+            var paired = Read(provider);
+            var checkpoint = paired.Checkpoint!;
+            Check(checkpoint.Sequence == 2 && checkpoint.Generation == first.Checkpoint!.Generation && checkpoint.Counts.TotalTokens == 10
+                && first.Checkpoint.Counts.TotalTokens == 0, "checkpoint sequence advances without mutating earlier observations");
+            bool immutable = false;
+            try { ((IList<UsageLedgerCursorCheckpoint>)checkpoint.Cursors).Clear(); }
+            catch (NotSupportedException) { immutable = true; }
+            Check(immutable, "captured cursor collection is immutable");
+            string serialized = JsonSerializer.Serialize(checkpoint);
+            var roundTrip = JsonSerializer.Deserialize<UsageLedgerCheckpoint>(serialized)!;
+            Check(roundTrip.HasValidChecksum() && !serialized.Contains("token_usage_record") && !serialized.Contains("response_item"),
+                "checkpoint JSON round trip retains numeric metadata without message bodies");
+            now = now.AddSeconds(1);
+            Append(root, Usage("root", "work", "r1", now, 999, 999), Usage("root", "work", "r2", now, 6, 16));
+            string child = AddTask("child", now);
+            Append(child, Context("work", now), Usage("child", "work", "c1", now, 4, 4));
+            var restarted = new UsageLedgerProvider(home, () => now, roundTrip);
+            var caughtUp = Read(restarted);
+            Check(caughtUp.Health == SampleHealth.Fresh && caughtUp.Epoch == checkpoint.Epoch && caughtUp.Counts.TotalTokens == 20
+                && caughtUp.Checkpoint?.Generation == checkpoint.Generation && caughtUp.Checkpoint.Sequence == checkpoint.Sequence + 1,
+                "restart replays only offline increments, deduplicates old responses, and includes a demonstrably new task");
+            var repeat = Read(restarted);
+            Check(repeat.Counts.TotalTokens == 20 && repeat.Checkpoint?.Sequence == caughtUp.Checkpoint!.Sequence + 1,
+                "repeated checkpoint reads never count caught-up records twice");
+            var invalidCounter = checkpoint with { Counts = new TokenCounts(999, 999, 0, 0, 0, 999) };
+            var rejectedCounter = Read(new UsageLedgerProvider(home, () => now, invalidCounter));
+            Check(rejectedCounter.Health == SampleHealth.Partial && rejectedCounter.Epoch != checkpoint.Epoch
+                && rejectedCounter.Counts.TotalTokens == 0 && rejectedCounter.Checkpoint is null,
+                "damaged checkpoint counts cannot inherit a prior epoch or fabricate usage");
+            var negative = (checkpoint with { Counts = new TokenCounts(-1, 0, 0, 0, 0, -1) }).Seal();
+            Check(Read(new UsageLedgerProvider(home, () => now, negative)).Epoch != checkpoint.Epoch,
+                "even a resealed checkpoint must satisfy numeric consistency");
+            var badSequence = (checkpoint with { Sequence = 0 }).Seal();
+            Check(Read(new UsageLedgerProvider(home, () => now, badSequence)).Epoch != checkpoint.Epoch,
+                "checkpoint sequence must be positive");
+            var duplicateIds = (checkpoint with { Cursors = new[] { checkpoint.Cursors[0] with { ResponseOrder = new[] { "r1", "r1" } } } }).Seal();
+            Check(Read(new UsageLedgerProvider(home, () => now, duplicateIds)).Epoch != checkpoint.Epoch,
+                "ambiguous response-deduplication metadata is rejected");
+            string otherHome = Path.Combine(home, "other-home");
+            Directory.CreateDirectory(Path.Combine(otherHome, "sessions"));
+            Sql(Path.Combine(otherHome, "state_5.sqlite"), "CREATE TABLE threads(id TEXT,rollout_path TEXT);");
+            var crossed = Read(new UsageLedgerProvider(otherHome, () => now, checkpoint));
+            Check(crossed.Health == SampleHealth.Partial && crossed.Epoch != checkpoint.Epoch && crossed.Counts.TotalTokens == 0,
+                "checkpoint cannot carry counters across Codex homes");
+            now = now.AddSeconds(1);
+            var beforeLate = Read(restarted).Checkpoint!;
+            string late = AddTask("late-old-task", beforeLate.ObservedAt.AddSeconds(-1));
+            Append(late, Context("old", now), Usage("late-old-task", "old", "old-r1", now, 500, 500));
+            var lateRead = Read(new UsageLedgerProvider(home, () => now, beforeLate));
+            Check(lateRead.Health == SampleHealth.Partial && lateRead.Epoch != beforeLate.Epoch && lateRead.Counts.TotalTokens == 0,
+                "late discovery of a pre-checkpoint task cannot silently cross the saved watermark");
+
+            foreach (string mode in new[] { "missing", "replacement", "truncated", "anchor", "schema" })
+            {
+                now = now.AddSeconds(1);
+                File.WriteAllText(root, Meta("root", now.AddSeconds(-1)) + "\n" + Context("failure", now) + "\n"
+                    + Usage("root", "failure", "baseline-" + mode, now, 10, 10) + "\n", new UTF8Encoding(false));
+                var fresh = new UsageLedgerProvider(home, () => now);
+                Read(fresh);
+                now = now.AddSeconds(1);
+                Append(root, Usage("root", "failure", "new-" + mode, now, 5, 15));
+                var saved = Read(fresh).Checkpoint!;
+                if (mode == "missing") File.Delete(root);
+                else if (mode == "replacement")
+                {
+                    string replacement = root + ".replacement";
+                    File.Copy(root, replacement);
+                    File.Move(replacement, root, true);
+                }
+                else if (mode == "truncated") File.WriteAllText(root, Meta("root", now) + "\n", new UTF8Encoding(false));
+                else if (mode == "anchor")
+                {
+                    using var file = new FileStream(root, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                    file.Position = saved.Cursors.Single(cursor => cursor.ThreadId == "root").Offset - 2;
+                    file.WriteByte((byte)'!');
+                }
+                else Sql(database, "ALTER TABLE threads ADD COLUMN changed_schema TEXT;");
+                var broken = Read(new UsageLedgerProvider(home, () => now, saved));
+                Check(broken.Health != SampleHealth.Fresh && broken.Epoch != saved.Epoch && broken.Counts.TotalTokens == 0
+                    && broken.Checkpoint is null, mode + " breaks recovery and starts an explicit new baseline");
+            }
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            Console.Error.WriteLine("FAIL ledger checkpoint fixture: " + ex.GetType().Name + ": " + ex.Message);
+        }
+        finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
+        Console.WriteLine($"Ledger checkpoint: {checks} checks, {failures} failure(s)");
+        return failures;
+    }
+    private static int RunEstimatorCheckpointIntegration()
+    {
+        int failures = 0, checks = 0;
+        void Check(bool valid, string scenario)
+        {
+            checks++;
+            if (valid) return;
+            failures++;
+            Console.Error.WriteLine("FAIL checkpoint integration: " + scenario);
+        }
+        string home = Path.Combine(Path.GetTempPath(), "codex-hud-checkpoint-integration-" + Guid.NewGuid().ToString("N"));
+        string sessions = Path.Combine(home, "sessions");
+        Directory.CreateDirectory(sessions);
+        string database = Path.Combine(home, "state_5.sqlite"), history = Path.Combine(home, "estimator.json");
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var resetAt = now.AddHours(5);
+        try
+        {
+            Sql(database, "CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,model TEXT,reasoning_effort TEXT,model_provider TEXT,thread_source TEXT);");
+            string AddTask(string id, DateTimeOffset created)
+            {
+                string path = Path.Combine(sessions, id + ".jsonl");
+                File.WriteAllText(path, Meta(id, created) + "\n", new UTF8Encoding(false));
+                Sql(database, $"INSERT INTO threads VALUES({Q(id)},{Q(path)},'gpt-6-astra','high','openai',NULL);");
+                return path;
+            }
+            UsageLedgerSnapshot Read(UsageLedgerProvider provider) => provider.ReadCheckpointAsync().GetAwaiter().GetResult();
+            QuotaWindow Window(double remaining) => new("codex-primary", "codex", "fixture", "primary", 300, remaining, resetAt);
+            QuotaSnapshot Quota(double remaining) => new(now, new[] { Window(remaining) }, SampleHealth.Fresh) { AccountKey = "fixture-account" };
+            string root = AddTask("root", now.AddDays(-1));
+            var provider = new UsageLedgerProvider(home, () => now);
+            var estimator = new QuotaTokenEstimator(history);
+            estimator.Observe(Quota(100), Read(provider));
+            now = now.AddSeconds(1);
+            Append(root, Context("work", now), Usage("root", "work", "r1", now, 10, 10));
+            var pendingUsage = Read(provider);
+            estimator.Observe(Quota(99), pendingUsage);
+            string pendingJson = File.ReadAllText(history);
+            var pendingDocument = System.Text.Json.Nodes.JsonNode.Parse(pendingJson)!;
+            var storedCheckpoint = pendingDocument["LedgerCheckpoint"]!.Deserialize<UsageLedgerCheckpoint>()!;
+            Check(pendingDocument["Version"]!.GetValue<int>() == 3
+                && storedCheckpoint.Generation == pendingUsage.Checkpoint!.Generation
+                && storedCheckpoint.Sequence == pendingUsage.Checkpoint.Sequence && storedCheckpoint.Counts == pendingUsage.Counts,
+                "one V3 write contains the checkpoint of its matching one-point quota observation");
+            var restored = new QuotaTokenEstimator(history);
+            Check(restored.RestoredLedgerCheckpoint is not null, "V3 exposes the valid paired ledger checkpoint for restart");
+            now = now.AddSeconds(1);
+            Append(root, Usage("root", "work", "r1", now, 10, 10), Usage("root", "work", "r2", now, 6, 16));
+            string child = AddTask("child", now);
+            Append(child, Context("work", now), Usage("child", "work", "c1", now, 4, 4));
+            var resumedProvider = new UsageLedgerProvider(home, () => now, restored.RestoredLedgerCheckpoint);
+            var resumedUsage = Read(resumedProvider);
+            var resumedQuota = Quota(98);
+            Check(resumedUsage.Health == SampleHealth.Fresh && resumedUsage.Counts.TotalTokens == 20
+                && resumedUsage.Epoch == pendingUsage.Epoch, "offline replay counts exactly twenty workload tokens including the new task");
+            restored.Observe(resumedQuota, resumedUsage);
+            var closed = restored.Get(Window(98), now);
+            Check(closed.Segments == 1 && closed.ObservedDrop == 2,
+                "one point before restart plus one point after restart closes exactly one two-point segment");
+            restored.Observe(resumedQuota, resumedUsage);
+            Check(restored.Get(Window(98), now).Segments == 1, "replaying the paired observation cannot close the same segment again");
+            for (int step = 1; step <= 2; step++)
+            {
+                now = now.AddSeconds(1);
+                Append(root, Usage("root", "work", "later-" + step, now, 20, 16 + step * 20));
+                restored.Observe(Quota(98 - 2 * step), Read(resumedProvider));
+            }
+            var trained = restored.Get(Window(94), now);
+            Check(trained.Segments == 3 && trained.ObservedDrop == 6 && trained.RemainingTokens is > 0,
+                "verified continuation produces three non-overlapping calibrated segments");
+            string trainedJson = File.ReadAllText(history);
+
+            var mixedDocument = System.Text.Json.Nodes.JsonNode.Parse(pendingJson)!;
+            var mixed = (storedCheckpoint with { Generation = Guid.NewGuid().ToString("N") }).Seal();
+            mixedDocument["LedgerCheckpoint"] = JsonSerializer.SerializeToNode(mixed);
+            File.WriteAllText(history, mixedDocument.ToJsonString());
+            var mixedEstimator = new QuotaTokenEstimator(history);
+            now = now.AddSeconds(1);
+            var mixedProvider = new UsageLedgerProvider(home, () => now, mixedEstimator.RestoredLedgerCheckpoint);
+            var mixedUsage = Read(mixedProvider);
+            mixedEstimator.Observe(Quota(94), mixedUsage);
+            Check(mixedEstimator.Get(Window(94), now).Segments == 0,
+                "a ledger from a different generation cannot bridge the saved pending anchor");
+
+            var damagedDocument = System.Text.Json.Nodes.JsonNode.Parse(trainedJson)!;
+            damagedDocument["LedgerCheckpoint"]!["Checksum"] = "damaged";
+            File.WriteAllText(history, damagedDocument.ToJsonString());
+            var damagedEstimator = new QuotaTokenEstimator(history);
+            Check(damagedEstimator.RestoredLedgerCheckpoint is null,
+                "damaged checkpoint is withheld independently from closed estimator history");
+            now = now.AddSeconds(1);
+            var freshProvider = new UsageLedgerProvider(home, () => now);
+            damagedEstimator.Observe(Quota(94), Read(freshProvider));
+            Check(damagedEstimator.Get(Window(94), now).Segments == 3,
+                "discarding a damaged checkpoint does not discard the three already closed segments");
+            for (int confirmation = 0; confirmation < 2; confirmation++)
+            {
+                now = now.AddSeconds(1);
+                var unchanged = Read(freshProvider);
+                Check(unchanged.Health == SampleHealth.Fresh && unchanged.Checkpoint is not null && unchanged.Counts.TotalTokens == 0,
+                    "healthy restart confirmation has no newly invented workload tokens, observation " + confirmation);
+                damagedEstimator.Observe(Quota(94), unchanged);
+            }
+            var reconfirmed = damagedEstimator.Get(Window(94), now);
+            Check(reconfirmed.State is EstimateState.Estimated or EstimateState.Variable && reconfirmed.RemainingTokens is > 0
+                && reconfirmed.Segments == 3 && reconfirmed.ObservedDrop == 6,
+                "two healthy unchanged quota observations reactivate preserved calibration without any further drop");
+
+            string noCheckpointHistory = Path.Combine(home, "no-checkpoint.json");
+            File.WriteAllText(noCheckpointHistory, trainedJson);
+            var noCheckpointEstimator = new QuotaTokenEstimator(noCheckpointHistory);
+            var noCheckpointProvider = new UsageLedgerProvider(home, () => now, noCheckpointEstimator.RestoredLedgerCheckpoint);
+            now = now.AddSeconds(1);
+            Append(root, Usage("root", "work", "unpersisted-1", now, 10, 66));
+            // A Fresh observation may lack a checkpoint when its metadata exceeds the capture budget.
+            var uncaptured = Read(noCheckpointProvider) with { Checkpoint = null };
+            Check(uncaptured.Health == SampleHealth.Fresh && uncaptured.Counts.TotalTokens == 70,
+                "missing checkpoint does not turn a valid ledger observation into unknown numeric usage");
+            noCheckpointEstimator.Observe(Quota(93), uncaptured);
+            var unpairedDocument = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(noCheckpointHistory))!;
+            Check(unpairedDocument["Windows"]!.AsArray().All(window => window?["Anchor"] is null),
+                "Fresh pairing without a new checkpoint cannot persist its new anchor against an older checkpoint");
+            var afterUncaptured = new QuotaTokenEstimator(noCheckpointHistory);
+            now = now.AddSeconds(1);
+            Append(root, Usage("root", "work", "unpersisted-2", now, 10, 76));
+            var afterUncapturedProvider = new UsageLedgerProvider(home, () => now, afterUncaptured.RestoredLedgerCheckpoint);
+            var afterUncapturedUsage = Read(afterUncapturedProvider);
+            afterUncaptured.Observe(Quota(92), afterUncapturedUsage);
+            Check(afterUncaptured.Get(Window(92), now).Segments == 3,
+                "restart cannot join an unpersisted one-point anchor to the older saved checkpoint to fabricate another segment");
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            Console.Error.WriteLine("FAIL checkpoint integration fixture: " + ex.GetType().Name + ": " + ex.Message);
+        }
+        finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
+        Console.WriteLine($"Checkpoint integration: {checks} checks, {failures} failure(s)");
         return failures;
     }
     public static async Task<int> LiveAsync()
