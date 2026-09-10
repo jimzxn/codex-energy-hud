@@ -24,7 +24,7 @@ public sealed record WorkloadUsageSnapshot(DateTimeOffset ObservedAt, IReadOnlyL
 /// </summary>
 public sealed class WorkloadUsageProvider
 {
-    internal const int HistorySeconds = 60;
+    internal const int HistorySeconds = UsageSmoothing.RetainedSeconds;
     private static readonly TokenCounts Zero = new(0, 0, 0, 0, 0, 0);
     private readonly string _home;
     private readonly Func<DateTimeOffset> _clock;

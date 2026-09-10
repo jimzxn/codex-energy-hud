@@ -12,6 +12,7 @@ internal sealed partial class MainWindow
         _settingsPanel.Children.Add(Toggle("锁定位置", _settings.PositionLocked, value => { _settings.PositionLocked = value; Save(); }));
         _settingsPanel.Children.Add(Toggle("完成 / 中断时弹出桌面提醒", _settings.CompletionNotifications, value => { _settings.CompletionNotifications = value; Save(); }));
         _settingsPanel.Children.Add(Toggle("提醒声音", _settings.NotificationSound, value => { _settings.NotificationSound = value; Save(); }));
+        _settingsPanel.Children.Add(Toggle("显示会话 API 等效费用", _settings.ShowSessionCost, value => { _settings.ShowSessionCost = value; Save(); UpdateSessionCosts(); UpdateWorkload(); }));
         var startup = new CheckBox { Content = "登录自启（下次登录生效）", IsChecked = LoginStartup.IsEnabled };
         bool changing = false;
         startup.IsCheckedChanged += (_, _) =>

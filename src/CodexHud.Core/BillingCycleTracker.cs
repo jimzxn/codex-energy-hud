@@ -147,6 +147,22 @@ public sealed class BillingCycleTracker
                     }
                     state.ManualMerge = null;
                 }
+                bool refill = remaining > state.LastRemaining + .000001;
+                bool pendingHasResetEvidence = state.Pending is { } candidate && state.Periods.Any(p =>
+                    p.Id == candidate.PeriodId && (p.IsCorrected || p.Reason == "Card"));
+                if (state.AcceptedResetAt - reset > DriftTolerance
+                    && !(refill && cardDecrease) && !pendingHasResetEvidence)
+                {
+                    // A deadline moving backwards is not a new quota cycle. Preserve the
+                    // healthy percentage baseline too, so its later recovery cannot look
+                    // like a refill. Explicit manual/card evidence may establish a reset.
+                    RemovePending(state);
+                    state.MetadataResetAt = reset;
+                    state.MetadataCorrected = true;
+                    state.LastObservedAt = now;
+                    accepted++;
+                    continue;
+                }
                 if (state.Pending is { } pending)
                 {
                     if (now < pending.RecheckAt) continue;
@@ -175,7 +191,6 @@ public sealed class BillingCycleTracker
                     // A brief correction must not leave a false billable period behind.
                     RemovePending(state);
                 }
-                bool refill = remaining > state.LastRemaining + .000001;
                 bool natural = state.AcceptedResetAt <= now && reset > now
                     && reset > state.AcceptedResetAt + DriftTolerance
                     && (!state.MetadataCorrected || Math.Abs((reset - state.MetadataResetAt).TotalSeconds) > 120);
@@ -217,8 +232,7 @@ public sealed class BillingCycleTracker
                 }
                 else if (Math.Abs((reset - state.AcceptedResetAt).TotalSeconds) > 120)
                 {
-                    // A metadata correction alone cannot establish a reset. Never extend the old guard.
-                    state.AcceptedResetAt = reset < state.AcceptedResetAt ? reset : state.AcceptedResetAt;
+                    // A metadata correction alone cannot establish a reset or replace its guard.
                     state.MetadataCorrected = true;
                 }
                 state.MetadataResetAt = reset;

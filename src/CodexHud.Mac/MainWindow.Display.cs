@@ -14,27 +14,33 @@ internal sealed partial class MainWindow
     private TaskNotice? _recentNotice;
     private DateTimeOffset _recentUntil;
     private Window? _toast;
+    private readonly TextBlock _resetCredits = Text("重置卡 —", 12);
 
     private void UpdateData()
     {
-        UpdateHardware();
-        if (_controller.Activity is { } activity && !ReferenceEquals(activity, _renderedActivity))
+        if (IsVisible) UpdateHardware();
+        if (_controller.Activity is { } activity)
         {
-            _renderedActivity = activity;
+            // Consume observations in the menu bar too; the tracker deduplicates unchanged snapshots.
             ShowNotices(_notices.Observe(activity, DateTimeOffset.UtcNow));
-            RenderTasks(activity);
+            if (IsVisible && !ReferenceEquals(activity, _renderedActivity))
+            {
+                _renderedActivity = activity;
+                RenderTasks(activity);
+            }
         }
         if (_controller.Quota is { } quota && !ReferenceEquals(quota, _renderedQuota))
         {
-            _renderedQuota = quota;
             if (_settings.SelectedQuotaKey is null && quota.Health is SampleHealth.Fresh or SampleHealth.Partial)
             {
                 _settings.SelectedQuotaKey = QuotaSelection.GetDefault(quota.Windows)?.Key;
+                _controller.SelectQuota(_settings.SelectedQuotaKey);
                 Save();
             }
-            RenderQuotaOptions();
+            if (IsVisible) { _renderedQuota = quota; RenderQuotaOptions(); }
         }
-        UpdateSummary(); UpdateClock();
+        if (IsVisible) { UpdateSummary(); UpdateClock(); UpdateWorkload(); UpdateSessionCosts(); }
+        UpdateBilling();
     }
 
     private void UpdateHardware()
@@ -79,7 +85,7 @@ internal sealed partial class MainWindow
         _activityStatus.Text = $"{snapshot.Tasks.Count} 项 · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss} · 本地推断"
             + (snapshot.Health is SampleHealth.Stale or SampleHealth.Unavailable ? " · 记录过期" : "");
         Hint(_activityStatus, snapshot.Message);
-        _tasks.Children.Clear(); _timingRows.Clear();
+        _tasks.Children.Clear(); _timingRows.Clear(); _taskCosts.Clear();
         foreach (var task in snapshot.Tasks)
         {
             var state = CurrentState(task, snapshot, DateTimeOffset.UtcNow);
@@ -87,13 +93,15 @@ internal sealed partial class MainWindow
             var timing = Text("", 10); _timingRows.Add((task, timing));
             var status = Text(StateLabel(state), 10); status.Foreground = StateBrush(state);
             var token = Text("TOKEN  本轮 " + Tokens(task.TokenUsage.CurrentTurn) + "   自身累计 " + Tokens(task.TokenUsage.Thread), 10);
+            var cost = Text("", 10); _taskCosts[task.Id] = cost;
+            RenderSessionCost(cost, task.Id);
             var counts = task.TokenUsage.CurrentTurn.Counts;
             var breakdown = Text($"输入 {Count(counts?.InputTokens)}   缓存 {Count(counts?.CachedInputTokens)}   输出 {Count(counts?.OutputTokens)}", 10);
             Hint(token, TokenHint(task.TokenUsage.CurrentTurn, "本轮") + "\n\n" + TokenHint(task.TokenUsage.Thread, "本任务自身累计") + "\n" + TaskTokenUsage.Scope);
             Hint(breakdown, "缓存输入包含在输入中，推理输出包含在输出中，不重复相加。");
             _tasks.Children.Add(new Border { Padding = new Thickness(9), Background = Brush.Parse("#1C261D"),
                 BorderBrush = StateBrush(state), BorderThickness = new Thickness(2, 0, 0, 0),
-                Child = new StackPanel { Spacing = 5, Children = { title, Row(status, timing), token, breakdown } } });
+                Child = new StackPanel { Spacing = 5, Children = { title, Row(status, timing), token, breakdown, cost } } });
         }
         if (snapshot.Tasks.Count == 0) _tasks.Children.Add(Text(snapshot.Health == SampleHealth.Unavailable ? "本地记录暂不可用" : "没有可显示的本机顶层任务", 12));
     }
@@ -110,7 +118,7 @@ internal sealed partial class MainWindow
             var selected = window.Key == _settings.SelectedQuotaKey;
             string value = window.RemainingPercent is { } v ? $"{v:0.#}%" : "—";
             var button = Button($"{(selected ? "●" : "○")}  {window.Label} · {QuotaProvider.FormatPeriod(window.WindowMinutes, window.Slot)} · 剩余 {value}", () =>
-            { _settings.SelectedQuotaKey = window.Key; _resetRequested = null; Save(); RenderQuotaOptions(); UpdateClock(); });
+            { _settings.SelectedQuotaKey = window.Key; _controller.SelectQuota(window.Key); _resetRequested = null; Save(); RenderQuotaOptions(); UpdateClock(); UpdateBilling(); });
             button.HorizontalAlignment = HorizontalAlignment.Stretch;
             _quotaOptions.Children.Add(button);
         }
@@ -130,7 +138,7 @@ internal sealed partial class MainWindow
         _reset.Text = selected?.ResetsAt is { } reset ? reset > now ? "重置 " + TaskTiming.Format(reset - now) : "等待重置查询" : "重置时间 —";
         if (selected?.ResetsAt is { } due && due <= now && _resetRequested != due)
         { _resetRequested = due; _controller.RefreshQuota(); }
-        var estimate = _controller.Estimate(selected);
+        var estimate = _controller.Estimate(selected, _settings.SelectedQuotaKey);
         var recovering = estimate.RecoveryRequired > 0;
         bool estimated = !recovering && (estimate.State is EstimateState.Estimated or EstimateState.Variable)
             && estimate.RemainingTokens is >= 0 && double.IsFinite(estimate.RemainingTokens.Value);
@@ -150,6 +158,7 @@ internal sealed partial class MainWindow
             + "\n经验范围不是统计置信区间；其他设备和云端消耗可能影响比例。\n" + estimate.Detail
             + $"\n采样 {estimate.From?.ToLocalTime():MM-dd HH:mm}–{estimate.Through?.ToLocalTime():MM-dd HH:mm}";
         Hint(_estimate, hint); Hint(_estimateDetail, hint);
+        UpdateResetCredits(now);
         if (_panel == "tasks" && _controller.Activity is { } activity)
             foreach (var (task, timing) in _timingRows)
             { var display = TaskTiming.Describe(task, activity, now); timing.Text = display.Label + " " + display.Text; }

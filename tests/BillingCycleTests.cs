@@ -59,6 +59,91 @@ public static class BillingCycleTests
             Check(tracker.GetPeriods(Key).Count == 1 && tracker.RecheckAt == null
                 && tracker.GetPeriods(Key)[0].EndsAt == Start.AddHours(5), "cancelled rebound restores previous end");
         });
+        Scenario("regressed quota deadline cannot split the current period", () =>
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "codex-billing-regression-tests-" + Guid.NewGuid().ToString("N"));
+            string path = Path.Combine(directory, "periods.json");
+            try
+            {
+                var tracker = new BillingCycleTracker(path);
+                var originalEnd = Start.AddDays(7);
+                var regressedEnd = originalEnd.AddDays(-1).AddMinutes(-17);
+                QuotaSnapshot Weekly(DateTimeOffset at, double remaining, DateTimeOffset reset) => Sample(at, remaining, reset) with
+                { Windows = [Window(remaining, reset) with { WindowMinutes = 10080 }] };
+                tracker.Observe(Weekly(Start, 17, originalEnd));
+                string id = tracker.GetPeriods(Key).Single().Id;
+                tracker.Observe(Weekly(Start.AddHours(9), 84, regressedEnd));
+                tracker.Observe(Weekly(Start.AddHours(9).AddSeconds(5), 84, regressedEnd));
+                Check(tracker.GetPeriods(Key).Count == 1 && tracker.GetPeriods(Key)[0].Id == id
+                    && tracker.GetPeriods(Key)[0].EndsAt == originalEnd && tracker.RecheckAt == null,
+                    "sustained percentage jump with an earlier deadline preserves the original cycle");
+                tracker = new BillingCycleTracker(path);
+                tracker.Observe(Weekly(Start.AddHours(10), 15, originalEnd));
+                Check(tracker.GetPeriods(Key).Count == 1 && tracker.GetPeriods(Key)[0].Id == id,
+                    "healthy baseline survives restart and return of original deadline");
+                tracker.Observe(Weekly(originalEnd.AddSeconds(1), 100, originalEnd.AddDays(7)));
+                Check(tracker.GetPeriods(Key).Count == 2 && tracker.GetPeriods(Key)[0].StartedAt == originalEnd
+                    && tracker.GetPeriods(Key)[0].Reason == "Natural", "the original trusted deadline still establishes the next natural period");
+            }
+            finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+        });
+        Scenario("metadata regression cannot poison the later refill baseline", () =>
+        {
+            var tracker = new BillingCycleTracker();
+            tracker.Observe(Sample(Start, 30));
+            tracker.Observe(Sample(Start.AddSeconds(60), 10, Start.AddHours(4)));
+            tracker.Observe(Sample(Start.AddSeconds(65), 90, Start.AddHours(4)));
+            tracker.Observe(Sample(Start.AddSeconds(70), 90, Start.AddHours(4)));
+            Check(tracker.GetPeriods(Key).Count == 1 && tracker.GetPeriods(Key)[0].EndsAt == Start.AddHours(5),
+                "earlier metadata before the rebound cannot shorten the reset guard or create a candidate");
+            tracker.Observe(Sample(Start.AddSeconds(75), 29));
+            tracker.Observe(Sample(Start.AddSeconds(80), 28));
+            Check(tracker.GetPeriods(Key).Count == 1 && tracker.RecheckAt == null,
+                "restoring normal quota after a low anomalous sample does not appear to be a refill");
+            var lowOnly = new BillingCycleTracker();
+            lowOnly.Observe(Sample(Start, 30));
+            lowOnly.Observe(Sample(Start.AddSeconds(60), 10, Start.AddHours(4)));
+            lowOnly.Observe(Sample(Start.AddSeconds(65), 29));
+            lowOnly.Observe(Sample(Start.AddSeconds(70), 28));
+            Check(lowOnly.GetPeriods(Key).Count == 1 && lowOnly.RecheckAt == null,
+                "a low regressed reading alone cannot create a refill when the original endpoint returns");
+        });
+        Scenario("pending recovery rolls back if its confirmation deadline regresses", () =>
+        {
+            var tracker = new BillingCycleTracker();
+            tracker.Observe(Sample(Start, 30));
+            tracker.Observe(Sample(Start.AddSeconds(60), 100));
+            Check(tracker.GetPeriods(Key)[0].IsPending, "ordinary recovery still starts a provisional candidate");
+            tracker.Observe(Sample(Start.AddSeconds(65), 99, Start.AddHours(4)));
+            Check(tracker.GetPeriods(Key).Count == 1 && tracker.GetPeriods(Key)[0].EndsAt == Start.AddHours(5)
+                && tracker.RecheckAt == null, "earlier confirmation deadline cancels the candidate and restores the original end");
+            tracker.Observe(Sample(Start.AddSeconds(70), 29));
+            Check(tracker.GetPeriods(Key).Count == 1, "a rejected confirmation cannot poison the later normal sample");
+        });
+        Scenario("explicit card and manual evidence permit an earlier reset deadline", () =>
+        {
+            var card = new BillingCycleTracker();
+            card.Observe(Sample(Start, 20, cards: 3));
+            card.Observe(Sample(Start.AddMinutes(1), 100, Start.AddHours(4), cards: 2));
+            card.Observe(Sample(Start.AddMinutes(1).AddSeconds(5), 99, Start.AddHours(4), cards: 2));
+            Check(card.GetPeriods(Key).Count == 2 && card.GetPeriods(Key)[0].Reason == "Card"
+                && !card.GetPeriods(Key)[0].IsPending && card.GetPeriods(Key)[0].EndsAt == Start.AddHours(4),
+                "card evidence remains attached to the candidate for confirmation with an earlier deadline");
+            var manual = new BillingCycleTracker();
+            manual.Observe(Sample(Start, 20));
+            Check(manual.AddManualReset(Key, Start.AddMinutes(1), out _), "manual reset is accepted before endpoint observation");
+            manual.Observe(Sample(Start.AddMinutes(2), 19, Start.AddHours(4)));
+            Check(manual.GetPeriods(Key).Count == 2 && manual.GetPeriods(Key)[0].Reason == "Manual"
+                && manual.GetPeriods(Key)[0].EndsAt == Start.AddHours(4), "manual reset retains its explicit boundary with an earlier endpoint");
+            var corrected = new BillingCycleTracker();
+            corrected.Observe(Sample(Start, 20));
+            corrected.Observe(Sample(Start.AddMinutes(1), 100));
+            corrected.CorrectStart(corrected.GetPeriods(Key)[0].Id, Start.AddSeconds(45), out _);
+            corrected.Observe(Sample(Start.AddMinutes(1).AddSeconds(5), 19, Start.AddHours(4)));
+            Check(corrected.GetPeriods(Key).Count == 2 && corrected.GetPeriods(Key)[0].IsCorrected
+                && !corrected.GetPeriods(Key)[0].IsPending && corrected.GetPeriods(Key)[0].EndsAt == Start.AddHours(4),
+                "user-confirmed automatic candidate remains authoritative even with an earlier endpoint");
+        });
         Scenario("card count and expiry evidence", () =>
         {
             var tracker = new BillingCycleTracker();

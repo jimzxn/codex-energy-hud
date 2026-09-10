@@ -603,8 +603,13 @@ public sealed class SessionCostProvider : IDisposable
             if (new FileInfo(_checkpointPath).Length > 256L * 1024 * 1024) throw new IOException("Checkpoint too large.");
             string json = File.ReadAllText(_checkpointPath);
             var saved = JsonSerializer.Deserialize<Checkpoint>(json);
-            if (saved == null || saved.Version is not (1 or CheckpointVersion) || saved.HomeHash != _homeHash
-                || saved.Checksum != DocumentChecksum(json)) throw new IOException("Invalid checkpoint.");
+            if (saved == null || saved.Version is not (1 or CheckpointVersion) || saved.HomeHash != _homeHash)
+                throw new IOException("Invalid checkpoint.");
+            bool legacyChecksum = saved.Checksum != DocumentChecksum(json);
+            // Earlier v2 saves hashed typed dates, whose '+' escapes differ from JsonNode strings.
+            // Accept that exact old representation once, then persist the canonical document hash.
+            if (legacyChecksum && (saved.Version != CheckpointVersion || saved.Checksum != LegacyChecksum(saved)))
+                throw new IOException("Invalid checkpoint.");
             bool migrate = saved.Version == 1;
             foreach (var file in saved.Files)
             {
@@ -625,7 +630,7 @@ public sealed class SessionCostProvider : IDisposable
                 _threads[thread.Id] = thread;
                 _responseRevision++;
             }
-            if (migrate) _dirty = true;
+            if (migrate || legacyChecksum) _dirty = true;
         }
         catch (Exception ex) when (ReadError(ex) || ex is NotSupportedException)
         { _files.Clear(); _threads.Clear(); _checkpointError = "费用缓存不可用，正从日志重新计算"; }
@@ -666,7 +671,9 @@ public sealed class SessionCostProvider : IDisposable
     private static DateTimeOffset? Later(DateTimeOffset? first, DateTimeOffset? second) =>
         first is null ? second : second is null ? first : first > second ? first : second;
 
-    private static string Checksum(Checkpoint saved)
+    private static string Checksum(Checkpoint saved) => DocumentChecksum(JsonSerializer.Serialize(saved));
+
+    private static string LegacyChecksum(Checkpoint saved)
     {
         string before = saved.Checksum; saved.Checksum = "";
         string hash = UsageLedgerCheckpoint.Hash(JsonSerializer.Serialize(saved));

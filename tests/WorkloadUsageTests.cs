@@ -97,11 +97,11 @@ public static class WorkloadUsageTests
             && retired.OverallHistory.Sum(tick => tick.Counts?.TotalTokens ?? 0)
                 == retired.Tasks.Sum(task => task.History.Sum(tick => tick.Counts?.TotalTokens ?? 0)),
             "recently removed task metadata remains beside its aggregate contribution");
-        for (int second = 0; second < 65; second++) { now = now.AddSeconds(1); Read(); }
+        for (int second = 0; second < UsageSmoothing.RetainedSeconds + 5; second++) { now = now.AddSeconds(1); Read(); }
         var bounded = Read();
-        Check(bounded.OverallHistory.Count == 60
-            && bounded.OverallHistory.Last().TickStart - bounded.OverallHistory.First().TickStart == TimeSpan.FromSeconds(59),
-            "history retains 60 consecutive completed seconds");
+        Check(bounded.OverallHistory.Count == UsageSmoothing.RetainedSeconds
+            && bounded.OverallHistory.Last().TickStart - bounded.OverallHistory.First().TickStart == TimeSpan.FromSeconds(UsageSmoothing.RetainedSeconds - 1),
+            "history retains 79 completed seconds for 60 display points and 19 warmup seconds");
         Check(bounded.Tasks.All(task => task.History.Last().Counts?.TotalTokens == 0), "idle tasks retain authoritative zero histories");
         Check(ReferenceEquals(bounded.Tasks.First(task => task.ThreadId == "root").History, bounded.Tasks.First(task => task.ThreadId == "child").History), "idle tasks share the same zero-history allocation");
         now = now.AddHours(12);
@@ -173,7 +173,7 @@ public static class WorkloadUsageTests
             cpuSeconds = (process.TotalProcessorTime - cpuStart).TotalSeconds, peakWorkingSetBytes = peakWorkingSet,
             readP50Ms = Percentile(.50), readP95Ms = Percentile(.95), readMaxMs = sorted[^1],
             maxBacklogFiles = maxBacklog, maxHistoryCount = maxHistory, unavailableSamples = unavailable,
-            passed = elapsed.Elapsed.TotalSeconds >= seconds && unavailable == 0 && maxHistory <= 60, samples };
+            passed = elapsed.Elapsed.TotalSeconds >= seconds && unavailable == 0 && maxHistory <= UsageSmoothing.RetainedSeconds, samples };
         string json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
         if (output is not null)
         {

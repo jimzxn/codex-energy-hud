@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodexHud.Core;
 
 public static class SessionCostTests
@@ -378,6 +379,74 @@ public static class SessionCostTests
             }
         });
 
+        Scenario("checkpoint restores dated Unicode usage without readable logs on every restart", () =>
+        {
+            using var fixture = new Fixture(DateTimeOffset.UtcNow.AddDays(-1).ToOffset(TimeSpan.FromHours(9)));
+            const string id = "任务-中文", response = "响应-α";
+            string root = fixture.Add(id);
+            Append(root, fixture.Usage(id, response));
+            string checkpoint = Path.Combine(fixture.Home, "cost-checkpoint.json");
+            using (var provider = new SessionCostProvider(fixture.Home, checkpoint))
+                Check(Read(provider).Ledger!.Responses.Single().ResponseId == response, "dated Unicode fixture is collected before saving");
+            Check(ValidDocumentChecksum(checkpoint), "new checkpoint uses the same document checksum when saving and restoring");
+            File.Move(root, Path.Combine(fixture.Home, "source-offline.jsonl"));
+            for (int restart = 0; restart < 3; restart++)
+            {
+                using var provider = new SessionCostProvider(fixture.Home, checkpoint, bytesPerRead: 1);
+                var snapshot = provider.ReadAsync().GetAwaiter().GetResult();
+                var restored = snapshot.Ledger!.Responses.SingleOrDefault();
+                Check(restored?.ResponseId == response && restored.RecordedAt == fixture.At.AddSeconds(1)
+                    && restored.RecordedAt?.Offset == TimeSpan.FromHours(9)
+                    && snapshot.Tasks[id].SelfUsd == RequestUsd && snapshot.Tasks[id].PricedResponses == 1,
+                    $"restart {restart + 1} restores counters, Unicode identity and timestamp before any log replay");
+                Check(snapshot.Ledger.Health == SampleHealth.Stale, "unavailable source is disclosed while retaining verified cached usage");
+            }
+        });
+
+        Scenario("legacy v2 checkpoint is retained and rewritten before another restart", () =>
+        {
+            using var fixture = new Fixture(DateTimeOffset.UtcNow.AddDays(-1).ToOffset(TimeSpan.FromMinutes(330)));
+            string root = fixture.Add("legacy-中文");
+            Append(root, fixture.Usage("legacy-中文", "旧响应"));
+            string checkpoint = Path.Combine(fixture.Home, "cost-checkpoint.json");
+            using (var provider = new SessionCostProvider(fixture.Home, checkpoint)) Read(provider);
+            WriteLegacyChecksum(checkpoint);
+            Check(!ValidDocumentChecksum(checkpoint), "fixture reproduces the old typed-date checksum mismatch");
+            File.Move(root, Path.Combine(fixture.Home, "source-offline.jsonl"));
+            using (var provider = new SessionCostProvider(fixture.Home, checkpoint, bytesPerRead: 1))
+            {
+                var snapshot = provider.ReadAsync().GetAwaiter().GetResult();
+                Check(snapshot.Ledger!.Responses.SingleOrDefault()?.ResponseId == "旧响应"
+                    && snapshot.Tasks["legacy-中文"].SelfUsd == RequestUsd,
+                    "legacy v2 response evidence survives validation without rescanning a source");
+            }
+            Check(ValidDocumentChecksum(checkpoint), "legacy acceptance marks the unchanged checkpoint dirty for canonical resave");
+            using var resumed = new SessionCostProvider(fixture.Home, checkpoint, bytesPerRead: 1);
+            Check(resumed.ReadAsync().GetAwaiter().GetResult().Ledger!.Responses.SingleOrDefault()?.ResponseId == "旧响应",
+                "the migrated checksum restores on the next restart without readable logs");
+        });
+
+        Scenario("tampered canonical and legacy checkpoints are not restored", () =>
+        {
+            foreach (bool legacy in new[] { false, true })
+            {
+                using var fixture = new Fixture(DateTimeOffset.UtcNow.AddDays(-1).ToOffset(TimeSpan.FromHours(9)));
+                string root = fixture.Add("root");
+                Append(root, fixture.Usage("root", "r1"));
+                string checkpoint = Path.Combine(fixture.Home, "cost-checkpoint.json");
+                using (var provider = new SessionCostProvider(fixture.Home, checkpoint)) Read(provider);
+                if (legacy) WriteLegacyChecksum(checkpoint);
+                string saved = File.ReadAllText(checkpoint);
+                string tampered = saved.Replace("\"OutputTokens\":20", "\"OutputTokens\":20000", StringComparison.Ordinal);
+                Check(tampered != saved, "tamper fixture changes stored numeric evidence");
+                File.WriteAllText(checkpoint, tampered, Utf8);
+                File.Move(root, Path.Combine(fixture.Home, "source-offline.jsonl"));
+                using var providerAfterTamper = new SessionCostProvider(fixture.Home, checkpoint, bytesPerRead: 1);
+                Check(providerAfterTamper.ReadAsync().GetAwaiter().GetResult().Ledger!.Responses.Count == 0,
+                    $"{(legacy ? "legacy" : "canonical")} checksum mismatch cannot restore modified counters");
+            }
+        });
+
         failures += UsageHistoryTests.Run();
         Console.WriteLine($"Session cost: {checks} checks, {failures} failure(s)");
         return failures;
@@ -385,6 +454,24 @@ public static class SessionCostTests
 
     private const decimal RequestUsd = 0.001665m;
     private static readonly UTF8Encoding Utf8 = new(false);
+
+    private static bool ValidDocumentChecksum(string path)
+    {
+        var document = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        string declared = document["Checksum"]!.GetValue<string>();
+        document["Checksum"] = "";
+        return declared == UsageLedgerCheckpoint.Hash(JsonSerializer.Serialize(document));
+    }
+
+    private static void WriteLegacyChecksum(string path)
+    {
+        // Preserve the original typed DateTimeOffset representation with literal '+'; the old
+        // writer hashed these exact bytes with only its Checksum property blanked.
+        string saved = File.ReadAllText(path);
+        string declared = JsonNode.Parse(saved)!["Checksum"]!.GetValue<string>();
+        string unsigned = saved.Replace($"\"Checksum\":\"{declared}\"", "\"Checksum\":\"\"", StringComparison.Ordinal);
+        File.WriteAllText(path, saved.Replace(declared, UsageLedgerCheckpoint.Hash(unsigned), StringComparison.Ordinal), Utf8);
+    }
 
     // Several reads allow small shared budgets and metadata discovery to catch up without wall-clock sleeps.
     private static SessionCostSnapshot Read(SessionCostProvider provider)
@@ -400,10 +487,11 @@ public static class SessionCostTests
     private sealed class Fixture : IDisposable
     {
         public string Home { get; } = Path.Combine(Path.GetTempPath(), "codex-hud-cost-tests-" + Guid.NewGuid().ToString("N"));
-        public DateTimeOffset At { get; } = DateTimeOffset.UtcNow.AddDays(-1);
+        public DateTimeOffset At { get; }
 
-        public Fixture()
+        public Fixture(DateTimeOffset? at = null)
         {
+            At = at ?? DateTimeOffset.UtcNow.AddDays(-1);
             Directory.CreateDirectory(Path.Combine(Home, "sessions", "2026", "09", "08"));
             Directory.CreateDirectory(Path.Combine(Home, "archived_sessions"));
         }

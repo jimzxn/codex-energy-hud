@@ -15,6 +15,7 @@ internal sealed class HudSettings
     public bool PositionLocked { get; set; }
     public bool CompletionNotifications { get; set; }
     public bool NotificationSound { get; set; }
+    public bool ShowSessionCost { get; set; } = true;
     public HardwareScope HardwareScope { get; set; }
     public string? SelectedQuotaKey { get; set; }
     public string? CodexHome { get; set; }

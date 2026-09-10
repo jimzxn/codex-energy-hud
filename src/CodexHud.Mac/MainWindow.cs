@@ -10,6 +10,7 @@ namespace CodexHud.Mac;
 
 internal sealed partial class MainWindow : Window
 {
+    private const double ContentWidth = 652;
     private static readonly IBrush Accent = Brush.Parse("#B7D776");
     private static readonly IBrush Muted = Brush.Parse("#94A395");
     private readonly SettingsStore _store = new();
@@ -27,7 +28,7 @@ internal sealed partial class MainWindow : Window
     private readonly StackPanel _tasks = new() { Spacing = 7 }, _quotaOptions = new() { Spacing = 5 };
     private readonly StackPanel _tasksPanel = new() { Spacing = 10 }, _quotasPanel = new() { Spacing = 10 }, _settingsPanel = new() { Spacing = 8 };
     private readonly ScrollViewer _details = new() { IsVisible = false, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
-    private readonly StackPanel _layout = new() { Width = 580, Spacing = 6 };
+    private readonly StackPanel _layout = new() { Width = ContentWidth, Spacing = 6 };
     private readonly Viewbox _scaled = new() { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.Both };
     private readonly Button _scope;
     private string? _panel;
@@ -43,6 +44,7 @@ internal sealed partial class MainWindow : Window
         _settings = _store.Load();
         _controller = new HudController(_settings, _store);
         _store.Save(_settings);
+        _controller.SelectQuota(_settings.SelectedQuotaKey);
         Title = "Codex HUD";
         SystemDecorations = SystemDecorations.None;
         CanResize = false;
@@ -68,15 +70,19 @@ internal sealed partial class MainWindow : Window
         ringButton.Padding = new Thickness(0);
         Grid.SetColumn(ringButton, 3); grid.Children.Add(ringButton);
         _layout.Children.Add(grid);
-        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), Margin = new Thickness(12, 0, 12, 5) };
+        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto"), Margin = new Thickness(12, 0, 12, 5) };
         bottom.Children.Add(_disk);
         var taskNav = Button("任务", () => OpenPanel("tasks")); Grid.SetColumn(taskNav, 1); bottom.Children.Add(taskNav);
         var quotaNav = Button("额度", () => OpenPanel("quotas")); Grid.SetColumn(quotaNav, 2); bottom.Children.Add(quotaNav);
-        var settingsNav = Button("设置", () => OpenPanel("settings")); Grid.SetColumn(settingsNav, 3); bottom.Children.Add(settingsNav);
+        var usageNav = Button("用量", () => OpenPanel("usage")); Grid.SetColumn(usageNav, 3); bottom.Children.Add(usageNav);
+        var billingNav = Button("周期", () => OpenPanel("billing")); Grid.SetColumn(billingNav, 4); bottom.Children.Add(billingNav);
+        var settingsNav = Button("设置", () => OpenPanel("settings")); Grid.SetColumn(settingsNav, 5); bottom.Children.Add(settingsNav);
         _layout.Children.Add(bottom);
+        BuildWorkload(); BuildBilling();
+        _layout.Children.Add(_workloadFooter);
         _tasksPanel.Children.Add(_memory); _tasksPanel.Children.Add(_activityStatus); _tasksPanel.Children.Add(_tasks);
         _quotasPanel.Children.Add(_quotaStatus); _quotasPanel.Children.Add(Button("刷新额度", _controller.RefreshQuota));
-        _quotasPanel.Children.Add(_quotaOptions); _quotasPanel.Children.Add(_estimateDetail);
+        _quotasPanel.Children.Add(_quotaOptions); _quotasPanel.Children.Add(_resetCredits); _quotasPanel.Children.Add(_estimateDetail);
         BuildSettings();
         _details.Margin = new Thickness(16, 2, 16, 12);
         _layout.Children.Add(_details);
@@ -88,7 +94,7 @@ internal sealed partial class MainWindow : Window
         Closing += (_, e) => { if (!_exiting) { e.Cancel = true; Hide(); } };
         PropertyChanged += (_, e) =>
         {
-            if (e.Property == IsVisibleProperty) _controller.SetHidden(!IsVisible);
+            if (e.Property == IsVisibleProperty) { _controller.SetHidden(!IsVisible); if (_ready && IsVisible) UpdateData(); }
 
         };
         PositionChanged += (_, _) =>
@@ -105,7 +111,7 @@ internal sealed partial class MainWindow : Window
         };
         Screens.Changed += DisplaysChanged;
         _controller.Changed += UpdateData;
-        _clock.Tick += (_, _) => { if (IsVisible) { UpdateClock(); UpdateSummary(); } };
+        _clock.Tick += (_, _) => { if (IsVisible) { UpdateClock(); UpdateSummary(); UpdateWorkload(); UpdateSessionCosts(); UpdateBilling(); } };
         KeyDown += (_, e) => { if (e.Key == Key.Escape && _panel is not null) OpenPanel(_panel); };
         ApplyAppearance();
     }
@@ -116,9 +122,9 @@ internal sealed partial class MainWindow : Window
     {
         _panel = _panel == panel ? null : panel;
         _details.IsVisible = _panel is not null;
-        _details.Content = _panel switch { "tasks" => _tasksPanel, "quotas" => _quotasPanel, "settings" => _settingsPanel, _ => null };
+        _details.Content = _panel switch { "tasks" => _tasksPanel, "quotas" => _quotasPanel, "settings" => _settingsPanel, "usage" => _workloadPanel, "billing" => _billingPanel, _ => null };
         ApplyAppearance();
-        if (_ready) Dispatcher.UIThread.Post(RestorePosition);
+        if (_ready) { UpdateWorkload(); UpdateBilling(); UpdateClock(); UpdateSessionCosts(); Dispatcher.UIThread.Post(RestorePosition); }
     }
 
     private void ChangeScope()
@@ -134,10 +140,10 @@ internal sealed partial class MainWindow : Window
         var screen = Screens.ScreenFromWindow(this) ?? Screens.Primary;
         var available = screen?.WorkingArea;
         var scaling = screen?.Scaling ?? 1;
-        var scale = Math.Min(_settings.Scale, available is { } area ? Math.Max(.5, area.Width / scaling / 584) : 2);
-        Width = 582 * scale;
-        _scaled.Width = 580 * scale;
-        _details.MaxHeight = Math.Max(80, Math.Min(480, ((available?.Height ?? 900) / scaling - 28) / scale - 150));
+        var scale = Math.Min(_settings.Scale, available is { } area ? Math.Max(.5, area.Width / scaling / (ContentWidth + 4)) : 2);
+        Width = ContentWidth * scale + 2;
+        _scaled.Width = ContentWidth * scale;
+        _details.MaxHeight = Math.Max(80, Math.Min(480, ((available?.Height ?? 900) / scaling - 28) / scale - 215));
     }
 
     private void DisplaysChanged(object? sender, EventArgs args)
@@ -154,7 +160,7 @@ internal sealed partial class MainWindow : Window
         if (screen is null) return;
         var area = screen.WorkingArea;
         int width = (int)Math.Ceiling(Width * screen.Scaling);
-        int height = (int)Math.Ceiling((double.IsFinite(Height) ? Height : 150 * _settings.Scale) * screen.Scaling);
+        int height = (int)Math.Ceiling((double.IsFinite(Height) ? Height : 215 * _settings.Scale) * screen.Scaling);
         Position = new PixelPoint(Math.Clamp(point?.X ?? area.X + (area.Width - width) / 2, area.X, Math.Max(area.X, area.Right - width)),
             Math.Clamp(point?.Y ?? area.Y + 20, area.Y, Math.Max(area.Y, area.Bottom - height)));
     }
@@ -163,7 +169,7 @@ internal sealed partial class MainWindow : Window
 
     public async Task StopAsync()
     {
-        _exiting = true; _clock.Stop(); _positionSave.Stop(); _toast?.Close(); Save();
+        _exiting = true; _clock.Stop(); _positionSave.Stop(); _toast?.Close(); CloseBillingReport(); Save();
         Screens.Changed -= DisplaysChanged;
         _controller.Changed -= UpdateData;
         await _controller.DisposeAsync();
